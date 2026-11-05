@@ -4,11 +4,28 @@ The Hush Security command line interface.
 
 ## Install
 
+macOS and Linux, with [Homebrew](https://brew.sh):
+
+```bash
+brew install hushsecurity/tap/hush-cli
+```
+
+Or with the install script (it checks the download's checksum):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/hushsecurity/hush-cli/main/install.sh | sh
+```
+
+Windows: download `hush_windows_<arch>.zip` from the
+[latest release](https://github.com/hushsecurity/hush-cli/releases/latest).
+
 From source, with Go 1.24 or later:
 
 ```bash
 git clone https://github.com/hushsecurity/hush-cli && cd hush-cli && make build
 ```
+
+The binary is called `hush`.
 
 ## Sign in
 
@@ -57,3 +74,13 @@ hush skills autosync off
 This adds a `SessionStart` hook to `~/.claude/settings.json` that runs
 `hush skills sync --quiet`. Agents without such hooks share the same skills
 folder, so they pick up what it syncs too; or run `hush skills sync` yourself.
+
+## Shell completion
+
+Homebrew installs it. Otherwise, e.g. for bash:
+
+```bash
+hush completion bash > ~/.local/share/bash-completion/completions/hush
+```
+
+`hush completion --help` covers zsh, fish and PowerShell.
