@@ -28,6 +28,9 @@ type Client struct {
 // signedIn trades the saved refresh token for an access token. Refresh
 // tokens are single use, so the new one is saved right away.
 func signedIn() (*Client, error) {
+	if err := lockSession(); err != nil {
+		return nil, err
+	}
 	var s Session
 	if err := load(sessionFile, &s); err != nil {
 		return nil, err

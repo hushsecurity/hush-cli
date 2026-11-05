@@ -347,6 +347,9 @@ func fetchFile(c *Client, s Skill, digest string) ([]byte, error) {
 
 // removeSkill uninstalls a skill and keeps sync from installing it again.
 func removeSkill(name string) error {
+	if err := lockSession(); err != nil {
+		return err
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return err

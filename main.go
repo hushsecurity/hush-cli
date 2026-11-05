@@ -4,6 +4,9 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
+	"strings"
+	"syscall"
 )
 
 var version = "dev" // set at build time
@@ -19,13 +22,28 @@ Commands:
   skills sync    Install your skills for your agents, and keep them current
   skills add     Install one skill (again, if you removed it)
   skills remove  Uninstall a skill, and keep sync from reinstalling it
+  skills autosync [on|off]
+                 Sync your skills whenever Claude Code starts
   version        Print the version
 
 Run "hush <command> -h" for a command's flags.
 `
 
 func main() {
-	if err := run(os.Args[1:]); err != nil {
+	go func() {
+		sig := make(chan os.Signal, 1)
+		signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+		<-sig
+		if unlock != nil {
+			unlock()
+		}
+		os.Exit(130)
+	}()
+	err := run(os.Args[1:])
+	if unlock != nil {
+		unlock()
+	}
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
@@ -62,7 +80,18 @@ func run(args []string) error {
 		}
 		return showSkill(args[0])
 	case "skills sync":
+		fs := flag.NewFlagSet("skills sync", flag.ExitOnError)
+		quiet := fs.Bool("quiet", false, "print nothing but errors")
+		_ = fs.Parse(args)
+		if *quiet {
+			os.Stdout, _ = os.OpenFile(os.DevNull, os.O_WRONLY, 0) // errors go to stderr
+		}
 		return syncSkills("")
+	case "skills autosync":
+		if len(args) > 1 {
+			return fmt.Errorf("usage: hush skills autosync [on|off]")
+		}
+		return autosync(strings.Join(args, ""))
 	case "skills add", "skills remove":
 		if len(args) != 1 {
 			return fmt.Errorf("usage: hush %s <name>", cmd)

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -155,5 +156,36 @@ func TestRemoveAndAdd(t *testing.T) {
 	}
 	if got := read(t, installed); got != "v1" {
 		t.Fatalf("added %q", got)
+	}
+}
+
+func TestAutosync(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	path := filepath.Join(home, ".claude", "settings.json")
+	_ = os.MkdirAll(filepath.Dir(path), 0o755)
+	other := `{"model": "opus", "hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": "echo hi"}]}]}}`
+	_ = os.WriteFile(path, []byte(other), 0o600)
+
+	if err := autosync("on"); err != nil {
+		t.Fatal(err)
+	}
+	if fi, _ := os.Stat(path); runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600 {
+		t.Fatalf("mode %v", fi.Mode().Perm())
+	}
+	if err := autosync("on"); err != nil { // no duplicate
+		t.Fatal(err)
+	}
+	got := read(t, path)
+	if strings.Count(got, syncArgs) != 1 || !strings.Contains(got, "echo hi") || !strings.Contains(got, "opus") {
+		t.Fatalf("on: %s", got)
+	}
+	if err := autosync("off"); err != nil {
+		t.Fatal(err)
+	}
+	got = read(t, path)
+	if strings.Contains(got, syncArgs) || !strings.Contains(got, "echo hi") {
+		t.Fatalf("off: %s", got)
 	}
 }

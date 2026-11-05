@@ -46,3 +46,14 @@ other agents read. Claude Code gets a link to each one in `~/.claude/skills`
 
 Sync only updates or removes skills it installed itself, and leaves other
 skills in those folders alone.
+
+### Keep skills current
+
+```bash
+hush skills autosync on   # sync whenever Claude Code starts a session
+hush skills autosync off
+```
+
+This adds a `SessionStart` hook to `~/.claude/settings.json` that runs
+`hush skills sync --quiet`. Agents without such hooks share the same skills
+folder, so they pick up what it syncs too; or run `hush skills sync` yourself.

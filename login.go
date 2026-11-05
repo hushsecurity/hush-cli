@@ -77,6 +77,10 @@ func login(api, org string) error {
 	if err != nil {
 		return err
 	}
+	// Locked only now, not across the browser wait.
+	if err := lockSession(); err != nil {
+		return err
+	}
 	tok, err := requestToken(api, url.Values{
 		"grant_type":    {"authorization_code"},
 		"code":          {code},

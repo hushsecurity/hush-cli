@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 // Session is the saved sign-in.
@@ -49,13 +51,55 @@ func save(name string, v any) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	data, err := json.MarshalIndent(v, "", "  ")
-	if err != nil {
+	return writeJSON(path, v, 0o600)
+}
+
+// writeJSON replaces a file with v as indented JSON, all at once.
+func writeJSON(path string, v any, perm os.FileMode) error {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(v); err != nil {
 		return err
 	}
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+	if err := os.WriteFile(tmp, buf.Bytes(), perm); err != nil {
 		return err
 	}
 	return os.Rename(tmp, path)
+}
+
+var unlock func() // set while this run holds the lock
+
+// lockSession keeps hush runs (e.g. autosync in two new sessions) from
+// using the single-use refresh token at once. It's released on exit, even
+// when interrupted; one older than any run takes is left from a crash.
+func lockSession() error {
+	if unlock != nil {
+		return nil
+	}
+	path, err := configPath("lock")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	for deadline := time.Now().Add(30 * time.Second); ; time.Sleep(200 * time.Millisecond) {
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		if err == nil {
+			_ = f.Close()
+			unlock = func() { _ = os.Remove(path) }
+			return nil
+		}
+		if !errors.Is(err, os.ErrExist) {
+			return err
+		}
+		if fi, err := os.Stat(path); err == nil && time.Since(fi.ModTime()) > 2*time.Minute {
+			_ = os.Remove(path)
+		} else if time.Now().After(deadline) {
+			return errors.New("another hush command is running")
+		}
+	}
 }
