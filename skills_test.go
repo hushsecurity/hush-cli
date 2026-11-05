@@ -130,3 +130,30 @@ func TestSyncRefusesBadFiles(t *testing.T) {
 		}
 	}
 }
+
+func TestRemoveAndAdd(t *testing.T) {
+	files := map[string]string{}
+	skills := []Skill{skill("one", 1, files, "v1")}
+	fakeAPI(t, &skills, files)
+	home, _ := os.UserHomeDir()
+	installed := filepath.Join(home, ".agents", "skills", "one", "SKILL.md")
+
+	if err := syncSkills(""); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeSkill("one"); err != nil {
+		t.Fatal(err)
+	}
+	if err := syncSkills(""); err != nil {
+		t.Fatal(err)
+	}
+	if read(t, installed) != "" {
+		t.Fatal("sync reinstalled a removed skill")
+	}
+	if err := syncSkills("one"); err != nil { // hush skills add one
+		t.Fatal(err)
+	}
+	if got := read(t, installed); got != "v1" {
+		t.Fatalf("added %q", got)
+	}
+}

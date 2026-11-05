@@ -16,7 +16,9 @@ Commands:
   status         Show who you're signed in as
   skills list    List the skills assigned to you
   skills show    Show a skill and its SKILL.md
-  skills sync    Install your skills into your agents' skills folders
+  skills sync    Install your skills for your agents, and keep them current
+  skills add     Install one skill (again, if you removed it)
+  skills remove  Uninstall a skill, and keep sync from reinstalling it
   version        Print the version
 
 Run "hush <command> -h" for a command's flags.
@@ -60,10 +62,15 @@ func run(args []string) error {
 		}
 		return showSkill(args[0])
 	case "skills sync":
-		fs := flag.NewFlagSet("skills sync", flag.ExitOnError)
-		skill := fs.String("skill", "", "sync only this skill")
-		_ = fs.Parse(args)
-		return syncSkills(*skill)
+		return syncSkills("")
+	case "skills add", "skills remove":
+		if len(args) != 1 {
+			return fmt.Errorf("usage: hush %s <name>", cmd)
+		}
+		if cmd == "skills add" {
+			return syncSkills(args[0])
+		}
+		return removeSkill(args[0])
 	case "version", "--version":
 		fmt.Println(version)
 		return nil

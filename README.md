@@ -30,10 +30,15 @@ Your organization's admins assign skills to you in Hush. To install them for
 your coding agents:
 
 ```bash
-hush skills list                  # what's assigned to you
-hush skills sync                  # install them, update them, remove unassigned ones
-hush skills sync --skill my-skill # just one
+hush skills list             # what's assigned to you, and what's installed
+hush skills show my-skill    # a skill's details and SKILL.md
+hush skills sync             # install them, update them, remove unassigned ones
+hush skills remove my-skill  # uninstall one; sync then leaves it out
+hush skills add my-skill     # install it again
 ```
+
+`hush status` shows who you're signed in as. `hush skills list --json` prints
+JSON for scripts.
 
 Skills are installed once in `~/.agents/skills`, which Codex, Cursor and most
 other agents read. Claude Code gets a link to each one in `~/.claude/skills`
