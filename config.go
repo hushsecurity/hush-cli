@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 )
 
@@ -70,13 +71,16 @@ func writeJSON(path string, v any, perm os.FileMode) error {
 	return os.Rename(tmp, path)
 }
 
-var unlock func() // set while this run holds the lock
+var (
+	lockMu   sync.Mutex
+	lockPath string // set while this run holds the lock
+)
 
 // lockSession keeps hush runs (e.g. autosync in two new sessions) from
 // using the single-use refresh token at once. It's released on exit, even
 // when interrupted; one older than any run takes is left from a crash.
 func lockSession() error {
-	if unlock != nil {
+	if lockPath != "" {
 		return nil
 	}
 	path, err := configPath("lock")
@@ -87,10 +91,14 @@ func lockSession() error {
 		return err
 	}
 	for deadline := time.Now().Add(30 * time.Second); ; time.Sleep(200 * time.Millisecond) {
+		lockMu.Lock() // so a signal can't land between taking and recording it
 		f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 		if err == nil {
 			_ = f.Close()
-			unlock = func() { _ = os.Remove(path) }
+			lockPath = path
+		}
+		lockMu.Unlock()
+		if err == nil {
 			return nil
 		}
 		if !errors.Is(err, os.ErrExist) {
@@ -101,5 +109,22 @@ func lockSession() error {
 		} else if time.Now().After(deadline) {
 			return errors.New("another hush command is running")
 		}
+	}
+}
+
+// touchLock shows a long run is still alive, so others don't break its lock.
+func touchLock() {
+	if lockPath != "" {
+		now := time.Now()
+		_ = os.Chtimes(lockPath, now, now)
+	}
+}
+
+func releaseLock() {
+	lockMu.Lock()
+	defer lockMu.Unlock()
+	if lockPath != "" {
+		_ = os.Remove(lockPath)
+		lockPath = ""
 	}
 }

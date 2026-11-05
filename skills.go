@@ -194,6 +194,11 @@ func syncSkills(only string) error {
 		return err
 	}
 	m.Removed = slices.DeleteFunc(m.Removed, func(n string) bool { return n == only || !hasSkill(skills, n) })
+	// Temp folders left by an interrupted run.
+	leftovers, _ := filepath.Glob(filepath.Join(shared, ".hush-*"))
+	for _, dir := range leftovers {
+		_ = os.RemoveAll(dir)
+	}
 	failed := 0
 	for _, s := range skills {
 		if only != "" && s.Name != only || slices.Contains(m.Removed, s.Name) {
@@ -208,6 +213,10 @@ func syncSkills(only string) error {
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Couldn't install %s: %v\n", s.Name, err)
 			failed++
+		}
+		// Saved per skill, so an interrupted run doesn't leave untracked ones.
+		if err := save(manifestFile, m); err != nil {
+			return err
 		}
 	}
 	if only == "" {
@@ -264,6 +273,7 @@ func installSkill(c *Client, dir string, s Skill, manifest map[string]Installed)
 		if err := download(c, s, f.Path, f.Digest, tmp); err != nil {
 			return false, err
 		}
+		touchLock()
 	}
 	if err := os.RemoveAll(dest); err != nil {
 		return false, err

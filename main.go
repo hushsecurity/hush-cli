@@ -17,16 +17,12 @@ func main() {
 	go func() {
 		sig := make(chan os.Signal, 1)
 		signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
-		<-sig
-		if unlock != nil {
-			unlock()
-		}
-		os.Exit(130)
+		s := <-sig
+		releaseLock()
+		os.Exit(128 + int(s.(syscall.Signal))) // 130 for Ctrl-C, 143 for SIGTERM
 	}()
 	err := rootCmd().Execute()
-	if unlock != nil {
-		unlock()
-	}
+	releaseLock()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
