@@ -3,9 +3,12 @@ package main
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -23,14 +26,17 @@ var linkedClients = []struct{ name, dir string }{
 }
 
 type Skill struct {
-	ID          string `json:"id"`
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	Version     int    `json:"version"`
-	Files       []struct {
-		Path   string `json:"path"`
-		Digest string `json:"digest"`
-	} `json:"files"`
+	ID          string      `json:"id"`
+	Name        string      `json:"name"`
+	Description string      `json:"description"`
+	Version     int         `json:"version"`
+	Files       []SkillFile `json:"files"`
+}
+
+type SkillFile struct {
+	Path   string `json:"path"`
+	Digest string `json:"digest"`
+	Size   int    `json:"size"`
 }
 
 // Installed is a skill sync installed, and the client folders it linked it into.
@@ -40,21 +46,99 @@ type Installed struct {
 	Links   []string `json:"links,omitempty"`
 }
 
-func listSkills() error {
+func fetchSkills(c *Client) ([]Skill, error) {
+	var skills []Skill
+	return skills, c.getJSON("/v1/skills/me", &skills)
+}
+
+type skillRow struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Version     int    `json:"version,omitempty"`
+	Installed   int    `json:"installed_version,omitempty"`
+	State       string `json:"state"`
+}
+
+func listSkills(asJSON bool) error {
 	c, err := signedIn()
 	if err != nil {
 		return err
 	}
-	var skills []Skill
-	if err := c.getJSON("/v1/skills/me", &skills); err != nil {
+	skills, err := fetchSkills(c)
+	if err != nil {
 		return err
 	}
-	if len(skills) == 0 {
+	manifest := map[string]Installed{}
+	if err := load(manifestFile, &manifest); err != nil {
+		return err
+	}
+	rows := []skillRow{}
+	for _, s := range skills {
+		inst, ok := manifest[s.Name]
+		state := "installed"
+		if !ok {
+			state = "not installed"
+		} else if inst.Version != s.Version {
+			state = fmt.Sprintf("update available (v%d installed)", inst.Version)
+		}
+		rows = append(rows, skillRow{s.Name, s.Description, s.Version, inst.Version, state})
+	}
+	for _, name := range slices.Sorted(maps.Keys(manifest)) {
+		if !hasSkill(skills, name) {
+			rows = append(rows, skillRow{Name: name, Installed: manifest[name].Version, State: "no longer assigned"})
+		}
+	}
+
+	if asJSON {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(rows)
+	}
+	if len(rows) == 0 {
 		fmt.Println("No skills are assigned to you.")
 	}
-	for _, s := range skills {
-		fmt.Printf("%s (v%d)\n  %s\n", s.Name, s.Version, s.Description)
+	for _, r := range rows {
+		fmt.Printf("%s  v%d  %s\n", r.Name, max(r.Version, r.Installed), r.State)
+		if r.Description != "" {
+			fmt.Printf("  %s\n", truncate(r.Description, 100))
+		}
 	}
+	return nil
+}
+
+func truncate(s string, n int) string {
+	if r := []rune(s); len(r) > n {
+		return string(r[:n-1]) + "…"
+	}
+	return s
+}
+
+// showSkill prints a skill's details and its SKILL.md.
+func showSkill(name string) error {
+	c, err := signedIn()
+	if err != nil {
+		return err
+	}
+	skills, err := fetchSkills(c)
+	if err != nil {
+		return err
+	}
+	i := slices.IndexFunc(skills, func(s Skill) bool { return s.Name == name })
+	if i < 0 {
+		return fmt.Errorf("skill %q is not assigned to you", name)
+	}
+	s := skills[i]
+	fmt.Printf("%s v%d\n\n%s\n\nFiles:\n", s.Name, s.Version, s.Description)
+	var skillMD []byte
+	for _, f := range s.Files {
+		fmt.Printf("  %s (%d bytes)\n", f.Path, f.Size)
+		if f.Path == "SKILL.md" {
+			if skillMD, err = fetchFile(c, s, f.Digest); err != nil {
+				return err
+			}
+		}
+	}
+	fmt.Printf("\n%s", skillMD)
 	return nil
 }
 
@@ -75,8 +159,8 @@ func syncSkills(only string) error {
 	if err != nil {
 		return err
 	}
-	var skills []Skill
-	if err := c.getJSON("/v1/skills/me", &skills); err != nil {
+	skills, err := fetchSkills(c)
+	if err != nil {
 		return err
 	}
 	if only != "" && !hasSkill(skills, only) {
@@ -203,26 +287,35 @@ func download(c *Client, s Skill, path, digest, root string) error {
 	if !filepath.IsLocal(rel) {
 		return fmt.Errorf("unsafe file path %q", path)
 	}
-	resp, err := c.get(fmt.Sprintf("/v1/skills/me/%s/files/%s", s.ID, digest))
+	data, err := fetchFile(c, s, digest)
 	if err != nil {
-		return err
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if err := checkStatus(resp); err != nil {
-		return err
-	}
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return err
-	}
-	if sum := sha256.Sum256(data); hex.EncodeToString(sum[:]) != digest {
-		return fmt.Errorf("%s: digest mismatch", path)
+		return fmt.Errorf("%s: %w", path, err)
 	}
 	dest := filepath.Join(root, rel)
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return err
 	}
 	return os.WriteFile(dest, data, 0o644)
+}
+
+// fetchFile downloads a skill file and checks it against its digest.
+func fetchFile(c *Client, s Skill, digest string) ([]byte, error) {
+	resp, err := c.get(fmt.Sprintf("/v1/skills/me/%s/files/%s", s.ID, digest))
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if err := checkStatus(resp); err != nil {
+		return nil, err
+	}
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if sum := sha256.Sum256(data); hex.EncodeToString(sum[:]) != digest {
+		return nil, errors.New("digest mismatch")
+	}
+	return data, nil
 }
 
 // removeUnassigned deletes the skills sync installed that are no longer yours.

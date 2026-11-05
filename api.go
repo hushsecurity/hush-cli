@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -48,6 +49,16 @@ func signedIn() (*Client, error) {
 		}
 	}
 	return &Client{api: s.API, accessToken: tok.AccessToken}, nil
+}
+
+// claims reads the access token's claims, for display only.
+func (c *Client) claims() map[string]any {
+	claims := map[string]any{}
+	if parts := strings.Split(c.accessToken, "."); len(parts) == 3 {
+		payload, _ := base64.RawURLEncoding.DecodeString(parts[1])
+		_ = json.Unmarshal(payload, &claims)
+	}
+	return claims
 }
 
 func requestToken(api string, form url.Values) (*token, error) {
