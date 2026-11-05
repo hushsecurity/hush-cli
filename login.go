@@ -99,6 +99,9 @@ func login(api, org string) error {
 }
 
 func logout() error {
+	if err := lockSession(); err != nil {
+		return err
+	}
 	path, err := configPath(sessionFile)
 	if err != nil {
 		return err
