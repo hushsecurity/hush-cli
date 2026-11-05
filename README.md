@@ -4,11 +4,28 @@ The Hush Security command line interface.
 
 ## Install
 
+macOS and Linux, with [Homebrew](https://brew.sh):
+
+```bash
+brew install hushsecurity/tap/hush-cli
+```
+
+Or with the install script (it checks the download's checksum):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/hushsecurity/hush-cli/main/install.sh | sh
+```
+
+Windows: download `hush_windows_<arch>.zip` from the
+[latest release](https://github.com/hushsecurity/hush-cli/releases/latest).
+
 From source, with Go 1.24 or later:
 
 ```bash
 git clone https://github.com/hushsecurity/hush-cli && cd hush-cli && make build
 ```
+
+The binary is called `hush`.
 
 ## Sign in
 
