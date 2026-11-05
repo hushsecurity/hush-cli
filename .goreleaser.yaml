@@ -35,7 +35,9 @@ homebrew_casks:
     repository:
       owner: hushsecurity
       name: homebrew-tap
-      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+      git:
+        url: git@github.com:hushsecurity/homebrew-tap.git
+        private_key: "{{ .Env.HOMEBREW_TAP_DEPLOY_KEY }}"
     # The binary isn't notarized: let macOS run it.
     hooks:
       post:
