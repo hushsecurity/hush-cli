@@ -86,7 +86,7 @@ func login(api, org string) error {
 	if err != nil {
 		return err
 	}
-	s.RefreshToken = tok.RefreshToken
+	s.RefreshToken, s.Org = tok.RefreshToken, org
 	if err := save(sessionFile, s); err != nil {
 		return err
 	}

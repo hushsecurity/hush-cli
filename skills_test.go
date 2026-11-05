@@ -45,10 +45,7 @@ func skill(name string, version int, files map[string]string, body string) Skill
 	digest := hex.EncodeToString(sum[:])
 	files[digest] = body
 	s := Skill{ID: "skl-" + name, Name: name, Version: version}
-	s.Files = append(s.Files, struct {
-		Path   string `json:"path"`
-		Digest string `json:"digest"`
-	}{"SKILL.md", digest})
+	s.Files = []SkillFile{{"SKILL.md", digest, len(body)}}
 	return s
 }
 

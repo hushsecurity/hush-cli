@@ -13,6 +13,7 @@ type Session struct {
 	ClientID     string `json:"client_id"`
 	RedirectURI  string `json:"redirect_uri"`
 	RefreshToken string `json:"refresh_token,omitempty"`
+	Org          string `json:"org,omitempty"` // the short name, when login was given it
 }
 
 func configPath(name string) (string, error) {

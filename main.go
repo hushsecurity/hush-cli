@@ -13,7 +13,9 @@ const usage = `Usage: hush <command> [flags]
 Commands:
   login          Sign in to Hush in your browser
   logout         Forget the saved sign-in
+  status         Show who you're signed in as
   skills list    List the skills assigned to you
+  skills show    Show a skill and its SKILL.md
   skills sync    Install your skills into your agents' skills folders
   version        Print the version
 
@@ -45,8 +47,18 @@ func run(args []string) error {
 		return login(*api, *org)
 	case "logout":
 		return logout()
+	case "status":
+		return status()
 	case "skills list":
-		return listSkills()
+		fs := flag.NewFlagSet("skills list", flag.ExitOnError)
+		asJSON := fs.Bool("json", false, "print JSON")
+		_ = fs.Parse(args)
+		return listSkills(*asJSON)
+	case "skills show":
+		if len(args) != 1 {
+			return fmt.Errorf("usage: hush skills show <name>")
+		}
+		return showSkill(args[0])
 	case "skills sync":
 		fs := flag.NewFlagSet("skills sync", flag.ExitOnError)
 		skill := fs.String("skill", "", "sync only this skill")
