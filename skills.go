@@ -39,6 +39,24 @@ type SkillFile struct {
 	Size   int    `json:"size"`
 }
 
+// Manifest tracks what hush installed, and the skills the user removed,
+// which sync then leaves out.
+type Manifest struct {
+	Installed map[string]Installed `json:"installed"`
+	Removed   []string             `json:"removed,omitempty"`
+}
+
+func loadManifest() (*Manifest, error) {
+	m := &Manifest{}
+	if err := load(manifestFile, m); err != nil {
+		return nil, err
+	}
+	if m.Installed == nil {
+		m.Installed = map[string]Installed{}
+	}
+	return m, nil
+}
+
 // Installed is a skill sync installed, and the client folders it linked it into.
 type Installed struct {
 	ID      string   `json:"id"`
@@ -68,24 +86,26 @@ func listSkills(asJSON bool) error {
 	if err != nil {
 		return err
 	}
-	manifest := map[string]Installed{}
-	if err := load(manifestFile, &manifest); err != nil {
+	m, err := loadManifest()
+	if err != nil {
 		return err
 	}
 	rows := []skillRow{}
 	for _, s := range skills {
-		inst, ok := manifest[s.Name]
+		inst, ok := m.Installed[s.Name]
 		state := "installed"
-		if !ok {
+		if slices.Contains(m.Removed, s.Name) {
+			state = `removed (run "hush skills add" to install it)`
+		} else if !ok {
 			state = "not installed"
 		} else if inst.Version != s.Version {
 			state = fmt.Sprintf("update available (v%d installed)", inst.Version)
 		}
 		rows = append(rows, skillRow{s.Name, s.Description, s.Version, inst.Version, state})
 	}
-	for _, name := range slices.Sorted(maps.Keys(manifest)) {
+	for _, name := range slices.Sorted(maps.Keys(m.Installed)) {
 		if !hasSkill(skills, name) {
-			rows = append(rows, skillRow{Name: name, Installed: manifest[name].Version, State: "no longer assigned"})
+			rows = append(rows, skillRow{Name: name, Installed: m.Installed[name].Version, State: "no longer assigned"})
 		}
 	}
 
@@ -142,6 +162,8 @@ func showSkill(name string) error {
 	return nil
 }
 
+// syncSkills installs every assigned skill but those the user removed, or
+// with `only`, just that one (adding it back), and removes unassigned ones.
 func syncSkills(only string) error {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -167,19 +189,20 @@ func syncSkills(only string) error {
 		return fmt.Errorf("skill %q is not assigned to you", only)
 	}
 
-	manifest := map[string]Installed{}
-	if err := load(manifestFile, &manifest); err != nil {
+	m, err := loadManifest()
+	if err != nil {
 		return err
 	}
+	m.Removed = slices.DeleteFunc(m.Removed, func(n string) bool { return n == only || !hasSkill(skills, n) })
 	failed := 0
 	for _, s := range skills {
-		if only != "" && s.Name != only {
+		if only != "" && s.Name != only || slices.Contains(m.Removed, s.Name) {
 			continue
 		}
-		changed, err := installSkill(c, shared, s, manifest)
+		changed, err := installSkill(c, shared, s, m.Installed)
 		for _, dir := range linkDirs {
 			if err == nil {
-				err = linkSkill(shared, dir, s.Name, changed, manifest)
+				err = linkSkill(shared, dir, s.Name, changed, m.Installed)
 			}
 		}
 		if err != nil {
@@ -188,9 +211,13 @@ func syncSkills(only string) error {
 		}
 	}
 	if only == "" {
-		removeUnassigned(shared, skills, manifest)
+		for name := range m.Installed {
+			if !hasSkill(skills, name) {
+				_ = uninstall(shared, name, m) // reported; retried next sync
+			}
+		}
 	}
-	if err := save(manifestFile, manifest); err != nil {
+	if err := save(manifestFile, m); err != nil {
 		return err
 	}
 	if failed > 0 {
@@ -318,23 +345,38 @@ func fetchFile(c *Client, s Skill, digest string) ([]byte, error) {
 	return data, nil
 }
 
-// removeUnassigned deletes the skills sync installed that are no longer yours.
-func removeUnassigned(shared string, skills []Skill, manifest map[string]Installed) {
-	for name, inst := range manifest {
-		if hasSkill(skills, name) {
-			continue
-		}
-		var err error
-		for _, dir := range append(inst.Links, shared) {
-			if e := os.RemoveAll(filepath.Join(dir, name)); e != nil {
-				err = e
-			}
-		}
-		if err != nil {
-			fmt.Printf("Couldn't remove %s: %v\n", name, err)
-			continue
-		}
-		delete(manifest, name)
-		fmt.Printf("Removed %s\n", name)
+// removeSkill uninstalls a skill and keeps sync from installing it again.
+func removeSkill(name string) error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
 	}
+	m, err := loadManifest()
+	if err != nil {
+		return err
+	}
+	if _, ok := m.Installed[name]; ok {
+		if err := uninstall(filepath.Join(home, sharedDir), name, m); err != nil {
+			return err
+		}
+	} else {
+		fmt.Printf("%s isn't installed; sync won't install it\n", name)
+	}
+	if !slices.Contains(m.Removed, name) {
+		m.Removed = append(m.Removed, name)
+	}
+	return save(manifestFile, m)
+}
+
+// uninstall deletes a skill hush installed, and its links.
+func uninstall(shared, name string, m *Manifest) error {
+	for _, dir := range append(m.Installed[name].Links, shared) {
+		if err := os.RemoveAll(filepath.Join(dir, name)); err != nil {
+			fmt.Fprintf(os.Stderr, "Couldn't remove %s: %v\n", name, err)
+			return err
+		}
+	}
+	delete(m.Installed, name)
+	fmt.Printf("Removed %s\n", name)
+	return nil
 }

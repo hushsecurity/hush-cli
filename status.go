@@ -24,11 +24,11 @@ func status() error {
 	if s.Org != "" {
 		orgName = fmt.Sprintf("%s (%s)", s.Org, orgName)
 	}
-	manifest := map[string]Installed{}
-	if err := load(manifestFile, &manifest); err != nil {
+	m, err := loadManifest()
+	if err != nil {
 		return err
 	}
 	fmt.Printf("Signed in to %s\n  user: %s (%v)\n  org:  %s\n  skills installed: %d\n",
-		c.api, user, claims["sub"], orgName, len(manifest))
+		c.api, user, claims["sub"], orgName, len(m.Installed))
 	return nil
 }
