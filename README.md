@@ -80,6 +80,7 @@ folder, so they pick up what it syncs too; or run `hush skills sync` yourself.
 Homebrew installs it. Otherwise, e.g. for bash:
 
 ```bash
+mkdir -p ~/.local/share/bash-completion/completions
 hush completion bash > ~/.local/share/bash-completion/completions/hush
 ```
 
