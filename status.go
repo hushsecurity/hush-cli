@@ -16,10 +16,7 @@ func status() error {
 		return err
 	}
 	claims := c.claims()
-	user := fmt.Sprint(claims["email"])
-	if name, ok := claims["name"].(string); ok && name != "" {
-		user = fmt.Sprintf("%s <%s>", name, user)
-	}
+	user := userName(claims)
 	orgName := fmt.Sprint(claims["oid"])
 	if s.Org != "" {
 		orgName = fmt.Sprintf("%s (%s)", s.Org, orgName)
@@ -31,4 +28,12 @@ func status() error {
 	fmt.Printf("Signed in to %s\n  user: %s (%v)\n  org:  %s\n  skills installed: %d\n",
 		c.api, user, claims["sub"], orgName, len(m.Installed))
 	return nil
+}
+
+// userName shows the user as "Name <email>", or just the email.
+func userName(claims map[string]any) string {
+	if name, ok := claims["name"].(string); ok && name != "" {
+		return fmt.Sprintf("%s <%v>", name, claims["email"])
+	}
+	return fmt.Sprint(claims["email"])
 }
