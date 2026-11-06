@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"html"
 	"net"
 	"net/http"
 	"net/url"
@@ -72,6 +73,7 @@ func login(api, org string) error {
 	authURL := api + "/v1/agents/oauth/authorize?" + q.Encode()
 	fmt.Printf("Opening your browser to sign in. If it doesn't open, visit:\n\n  %s\n\n", authURL)
 	_ = openBrowser(authURL)
+	fmt.Println("Waiting for you to sign in…")
 
 	code, err := waitForCode(ln, state)
 	if err != nil {
@@ -94,7 +96,15 @@ func login(api, org string) error {
 	if err := save(sessionFile, s); err != nil {
 		return err
 	}
-	fmt.Println("Signed in.")
+	claims := (&Client{accessToken: tok.AccessToken}).claims()
+	orgName := org
+	if orgName == "" {
+		orgName = fmt.Sprint(claims["oid"])
+	}
+	fmt.Printf("Signed in as %s to %s.\n", userName(claims), orgName)
+	if m, err := loadManifest(); err == nil && len(m.Installed) == 0 {
+		fmt.Println(`Run "hush skills sync" to install your skills.`)
+	}
 	return nil
 }
 
@@ -157,10 +167,15 @@ func waitForCode(ln net.Listener, state string) (string, error) {
 		}
 		res := result{code: q.Get("code")}
 		if res.code == "" {
-			res.err = fmt.Errorf("sign-in failed: %s %s", q.Get("error"), q.Get("error_description"))
-			http.Error(w, res.err.Error(), http.StatusBadRequest)
+			reason := q.Get("error")
+			if d := q.Get("error_description"); d != "" {
+				reason += ": " + d
+			}
+			res.err = errors.New("sign-in failed: " + reason)
+			w.WriteHeader(http.StatusBadRequest)
+			page(w, "Sign-in failed", reason+". Return to the terminal.")
 		} else {
-			_, _ = fmt.Fprintln(w, "You can close this tab and return to the terminal.")
+			page(w, "Signed in to Hush", "You can close this tab and return to the terminal.")
 		}
 		select {
 		case done <- res:
@@ -176,6 +191,17 @@ func waitForCode(ln net.Listener, state string) (string, error) {
 	case <-time.After(loginTimeout):
 		return "", errors.New("timed out waiting for the browser sign-in")
 	}
+}
+
+// The logo is linked, not bundled; offline it just doesn't show.
+const logo = "https://www.hush.security/wp-content/uploads/2026/10/hush-icon-color-150x150.png"
+
+// page shows a short message in the browser tab.
+func page(w http.ResponseWriter, title, msg string) {
+	_, _ = fmt.Fprintf(w, `<!doctype html><meta charset="utf-8"><title>%[1]s</title><link rel="icon" href="%[3]s">
+<body style="font-family:system-ui,sans-serif;text-align:center;margin-top:20vh">
+<img src="%[3]s" alt="" width="64"><h2>%[1]s</h2><p>%[2]s</p></body>`,
+		html.EscapeString(title), html.EscapeString(msg), logo)
 }
 
 func random() string {
