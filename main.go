@@ -68,8 +68,26 @@ func rootCmd() *cobra.Command {
 			Run:   func(*cobra.Command, []string) { fmt.Println(version) },
 		},
 		skillsCmd(),
+		gatewayCmd(),
 	)
 	return root
+}
+
+func gatewayCmd() *cobra.Command {
+	gw := &cobra.Command{Use: "gateway", Aliases: []string{"gw"}, Short: "Connect your agents to a Hush gateway"}
+	gw.AddCommand(&cobra.Command{
+		Use:   "proxy <gateway-url>",
+		Short: "Serve a gateway over stdio, for agents that run local MCP servers",
+		Long: `Serve a gateway over stdio, for agents that run local MCP servers.
+
+The connection is made from this device, and you sign in to the gateway in
+your browser the first time. Example, in an agent's MCP config:
+
+  "hush": {"command": "hush", "args": ["gateway", "proxy", "https://<gateway>/mcp"]}`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error { return gatewayProxy(args[0]) },
+	})
+	return gw
 }
 
 func skillsCmd() *cobra.Command {

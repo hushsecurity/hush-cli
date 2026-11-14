@@ -38,7 +38,7 @@ func signedIn() (*Client, error) {
 	if s.RefreshToken == "" {
 		return nil, errors.New(`not signed in: run "hush login"`)
 	}
-	tok, err := requestToken(s.API, url.Values{
+	tok, err := tokenAt(s.API+"/v1/agents/oauth/token", url.Values{
 		"grant_type":    {"refresh_token"},
 		"refresh_token": {s.RefreshToken},
 	})
@@ -64,8 +64,8 @@ func (c *Client) claims() map[string]any {
 	return claims
 }
 
-func requestToken(api string, form url.Values) (*token, error) {
-	resp, err := httpClient.PostForm(api+"/v1/agents/oauth/token", form)
+func tokenAt(endpoint string, form url.Values) (*token, error) {
+	resp, err := httpClient.PostForm(endpoint, form)
 	if err != nil {
 		return nil, err
 	}
@@ -110,11 +110,19 @@ func decode(resp *http.Response, v any) error {
 	return json.NewDecoder(resp.Body).Decode(v)
 }
 
+// statusError is a refused HTTP request.
+type statusError struct {
+	code int
+	msg  string
+}
+
+func (e *statusError) Error() string { return e.msg }
+
 func checkStatus(resp *http.Response) error {
 	if resp.StatusCode < 300 {
 		return nil
 	}
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-	return fmt.Errorf("%s %s: %s %s", resp.Request.Method, resp.Request.URL.Path,
-		resp.Status, strings.TrimSpace(string(body)))
+	return &statusError{resp.StatusCode, fmt.Sprintf("%s %s: %s %s", resp.Request.Method,
+		resp.Request.URL.Path, resp.Status, strings.TrimSpace(string(body)))}
 }

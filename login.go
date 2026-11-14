@@ -8,11 +8,13 @@ import (
 	"errors"
 	"fmt"
 	"html"
+	"maps"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -41,53 +43,13 @@ func login(api, org string) error {
 		s = Session{API: api}
 	}
 
-	// Reuse the registered redirect port when it's free, so one client
-	// (and one agent in Hush) serves every login.
-	ln, err := listen(s.RedirectURI)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = ln.Close() }()
-	redirectURI := fmt.Sprintf("http://%s/callback", ln.Addr())
-	if s.ClientID == "" || s.RedirectURI != redirectURI {
-		if s.ClientID, err = register(api, redirectURI); err != nil {
-			return err
-		}
-		s.RedirectURI = redirectURI
-	}
-
-	verifier, state := random(), random()
-	challenge := sha256.Sum256([]byte(verifier))
-	q := url.Values{
-		"response_type":         {"code"},
-		"client_id":             {s.ClientID},
-		"redirect_uri":          {redirectURI},
-		"code_challenge":        {base64.RawURLEncoding.EncodeToString(challenge[:])},
-		"code_challenge_method": {"S256"},
-		"state":                 {state},
-		"resource":              {api + "/v1/me"},
-	}
+	params := url.Values{"resource": {api + "/v1/me"}}
 	if org != "" {
-		q.Set("org_shortname", org)
+		params.Set("org_shortname", org)
 	}
-	authURL := api + "/v1/agents/oauth/authorize?" + q.Encode()
-	fmt.Printf("Opening your browser to sign in. If it doesn't open, visit:\n\n  %s\n\n", authURL)
-	_ = openBrowser(authURL)
-	fmt.Println("Waiting for you to sign in…")
-
-	code, err := waitForCode(ln, state)
-	if err != nil {
-		return err
-	}
-	// Locked only now, not across the browser wait.
-	if err := lockSession(); err != nil {
-		return err
-	}
-	tok, err := requestToken(api, url.Values{
-		"grant_type":    {"authorization_code"},
-		"code":          {code},
-		"redirect_uri":  {redirectURI},
-		"code_verifier": {verifier},
+	o := api + "/v1/agents/oauth"
+	tok, err := browserSignIn(&s.OAuthClient, o+"/authorize", o+"/token", o+"/register", params, func(authURL string) {
+		fmt.Printf("Opening your browser to sign in. If it doesn't open, visit:\n\n  %s\n\nWaiting for you to sign in…\n", authURL)
 	})
 	if err != nil {
 		return err
@@ -119,6 +81,9 @@ func logout() error {
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
+	if err := os.RemoveAll(filepath.Join(filepath.Dir(path), "gateways")); err != nil {
+		return err
+	}
 	fmt.Println("Signed out.")
 	return nil
 }
@@ -133,11 +98,11 @@ func listen(redirectURI string) (net.Listener, error) {
 	return net.Listen("tcp", "127.0.0.1:0")
 }
 
-func register(api, redirectURI string) (string, error) {
+func registerClient(endpoint, redirectURI string) (string, error) {
 	var out struct {
 		ClientID string `json:"client_id"`
 	}
-	err := postJSON(api+"/v1/agents/oauth/register", map[string]any{
+	err := postJSON(endpoint, map[string]any{
 		"client_name":                "Hush CLI",
 		"software_id":                "hush-cli",
 		"software_version":           version,
@@ -145,6 +110,59 @@ func register(api, redirectURI string) (string, error) {
 		"token_endpoint_auth_method": "none",
 	}, &out)
 	return out.ClientID, err
+}
+
+// browserSignIn runs a PKCE sign-in in the browser. It reuses c's redirect
+// port when free, so one client serves every sign-in, else registers anew.
+func browserSignIn(c *OAuthClient, authorizeURL, tokenURL, registerURL string, params url.Values, tell func(authURL string)) (*token, error) {
+	ln, err := listen(c.RedirectURI)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = ln.Close() }()
+	redirectURI := fmt.Sprintf("http://%s/callback", ln.Addr())
+	if c.ClientID == "" || c.RedirectURI != redirectURI {
+		if c.ClientID, err = registerClient(registerURL, redirectURI); err != nil {
+			return nil, err
+		}
+		c.RedirectURI = redirectURI
+	}
+
+	verifier, state := random(), random()
+	challenge := sha256.Sum256([]byte(verifier))
+	q := url.Values{
+		"response_type":         {"code"},
+		"client_id":             {c.ClientID},
+		"redirect_uri":          {redirectURI},
+		"code_challenge":        {base64.RawURLEncoding.EncodeToString(challenge[:])},
+		"code_challenge_method": {"S256"},
+		"state":                 {state},
+	}
+	maps.Copy(q, params)
+	authURL, err := url.Parse(authorizeURL)
+	if err != nil {
+		return nil, err
+	}
+	maps.Copy(q, authURL.Query())
+	authURL.RawQuery = q.Encode()
+	tell(authURL.String())
+	_ = openBrowser(authURL.String())
+
+	code, err := waitForCode(ln, state)
+	if err != nil {
+		return nil, err
+	}
+	// Locked only now, not across the browser wait.
+	if err := lockSession(); err != nil {
+		return nil, err
+	}
+	return tokenAt(tokenURL, url.Values{
+		"grant_type":    {"authorization_code"},
+		"code":          {code},
+		"redirect_uri":  {redirectURI},
+		"code_verifier": {verifier},
+		"client_id":     {c.ClientID},
+	})
 }
 
 // waitForCode serves the redirect and returns the authorization code.
@@ -210,7 +228,7 @@ func random() string {
 	return base64.RawURLEncoding.EncodeToString(b)
 }
 
-func openBrowser(u string) error {
+var openBrowser = func(u string) error { // a variable so tests can sign in without one
 	switch runtime.GOOS {
 	case "darwin":
 		return exec.Command("open", u).Start()
