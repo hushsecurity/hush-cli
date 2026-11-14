@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -22,63 +21,47 @@ func autosync(arg string) error {
 		return err
 	}
 	path := filepath.Join(home, ".claude", "settings.json")
-	settings := map[string]any{}
-	data, err := os.ReadFile(path)
-	if err == nil {
-		if err := json.Unmarshal(data, &settings); err != nil {
-			return fmt.Errorf("can't read %s: %w", path, err)
+	changed, err := editJSON(path, func(settings map[string]any) (bool, error) {
+		hooks, _ := settings["hooks"].(map[string]any)
+		if hooks == nil {
+			hooks = map[string]any{}
 		}
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	hooks, _ := settings["hooks"].(map[string]any)
-	if hooks == nil {
-		hooks = map[string]any{}
-	}
-	starts, _ := hooks["SessionStart"].([]any)
-	on := slices.ContainsFunc(starts, isSyncHook)
+		starts, _ := hooks["SessionStart"].([]any)
+		on := slices.ContainsFunc(starts, isSyncHook)
 
-	switch arg {
-	case "":
-		fmt.Println(map[bool]string{true: "on", false: "off"}[on])
-		return nil
-	case "on":
-		if on {
-			return nil
+		switch arg {
+		case "":
+			fmt.Println(map[bool]string{true: "on", false: "off"}[on])
+			return false, nil
+		case "on":
+			if on {
+				return false, nil
+			}
+			starts = append(starts, map[string]any{
+				"matcher": "startup",
+				"hooks": []any{map[string]any{
+					"type": "command", "command": hushPath() + " " + syncArgs, "timeout": 120,
+				}},
+			})
+		case "off":
+			starts = slices.DeleteFunc(starts, isSyncHook)
+		default:
+			return false, errors.New("usage: hush skills autosync [on|off]")
 		}
-		starts = append(starts, map[string]any{
-			"matcher": "startup",
-			"hooks": []any{map[string]any{
-				"type": "command", "command": hushPath() + " " + syncArgs, "timeout": 120,
-			}},
-		})
-	case "off":
-		starts = slices.DeleteFunc(starts, isSyncHook)
-	default:
-		return errors.New("usage: hush skills autosync [on|off]")
-	}
 
-	if len(starts) > 0 {
-		hooks["SessionStart"] = starts
-	} else {
-		delete(hooks, "SessionStart")
-	}
-	if len(hooks) > 0 {
-		settings["hooks"] = hooks
-	} else {
-		delete(settings, "hooks")
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	if real, err := filepath.EvalSymlinks(path); err == nil {
-		path = real // keep a dotfiles link
-	}
-	perm := os.FileMode(0o644)
-	if fi, err := os.Stat(path); err == nil {
-		perm = fi.Mode().Perm() // e.g. 0600 for one holding secrets
-	}
-	if err := writeJSON(path, settings, perm); err != nil {
+		if len(starts) > 0 {
+			hooks["SessionStart"] = starts
+		} else {
+			delete(hooks, "SessionStart")
+		}
+		if len(hooks) > 0 {
+			settings["hooks"] = hooks
+		} else {
+			delete(settings, "hooks")
+		}
+		return true, nil
+	})
+	if err != nil || !changed {
 		return err
 	}
 	fmt.Printf("Turned skills autosync %s for Claude Code\n", arg)
@@ -95,9 +78,9 @@ func isSyncHook(entry any) bool {
 	})
 }
 
-// hushPath is this binary's full path for the hook, preferring its PATH
-// entry (e.g. Homebrew's link), which survives upgrades.
-func hushPath() string {
+// hushExe is this binary's full path, preferring its PATH entry (e.g.
+// Homebrew's link), which survives upgrades.
+func hushExe() string {
 	exe, err := os.Executable()
 	if err != nil {
 		return "hush"
@@ -107,7 +90,12 @@ func hushPath() string {
 			exe = abs
 		}
 	}
-	exe = filepath.ToSlash(exe) // Claude Code runs Windows hooks in Git Bash
+	return exe
+}
+
+// hushPath is hushExe for a hook command.
+func hushPath() string {
+	exe := filepath.ToSlash(hushExe()) // Claude Code runs Windows hooks in Git Bash
 	if strings.ContainsAny(exe, ` '`) {
 		return strconv.Quote(exe)
 	}

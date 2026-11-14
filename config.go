@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -58,6 +59,37 @@ func save(name string, v any) error {
 		return err
 	}
 	return writeJSON(path, v, 0o600)
+}
+
+// editJSON reads a JSON object file (missing is empty), lets edit change it,
+// and writes it back if edit says so, keeping a symlink and the file's mode.
+func editJSON(path string, edit func(map[string]any) (bool, error)) (bool, error) {
+	var obj map[string]any
+	data, err := os.ReadFile(path)
+	if data = bytes.TrimSpace(bytes.TrimPrefix(data, []byte("\ufeff"))); len(data) > 0 {
+		if err := json.Unmarshal(data, &obj); err != nil {
+			return false, fmt.Errorf("can't read %s: %w", path, err)
+		}
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return false, err
+	}
+	if obj == nil { // missing, empty or null
+		obj = map[string]any{}
+	}
+	if changed, err := edit(obj); err != nil || !changed {
+		return false, err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return false, err
+	}
+	if real, err := filepath.EvalSymlinks(path); err == nil {
+		path = real // keep a dotfiles link
+	}
+	perm := os.FileMode(0o644)
+	if fi, err := os.Stat(path); err == nil {
+		perm = fi.Mode().Perm() // e.g. 0600 for one holding secrets
+	}
+	return true, writeJSON(path, obj, perm)
 }
 
 // writeJSON replaces a file with v as indented JSON, all at once.
