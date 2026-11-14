@@ -80,8 +80,9 @@ func gatewayCmd() *cobra.Command {
 		Short: "Serve a gateway over stdio, for agents that run local MCP servers",
 		Long: `Serve a gateway over stdio, for agents that run local MCP servers.
 
-The connection is made from this device, and you sign in to the gateway in
-your browser the first time. Example, in an agent's MCP config:
+The connection is made from this device. Until you sign in to the gateway, it
+offers one tool, hush_sign_in, which opens your browser when the agent calls
+it. Example, in an agent's MCP config:
 
   "hush": {"command": "hush", "args": ["gateway", "proxy", "https://<gateway>/mcp"]}`,
 		Args: cobra.ExactArgs(1),

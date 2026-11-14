@@ -193,7 +193,7 @@ func waitForCode(ln net.Listener, state string) (string, error) {
 			w.WriteHeader(http.StatusBadRequest)
 			page(w, "Sign-in failed", reason+". Return to the terminal.")
 		} else {
-			page(w, "Signed in to Hush", "You can close this tab and return to the terminal.")
+			page(w, "Signed in to Hush", "You can close this tab.")
 		}
 		select {
 		case done <- res:
