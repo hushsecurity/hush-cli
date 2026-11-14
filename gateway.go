@@ -52,11 +52,17 @@ type proxy struct {
 }
 
 func gatewayProxy(gw string) error {
-	u, err := url.Parse(gw)
-	if err != nil || u.Scheme != "https" || u.Host == "" {
-		return fmt.Errorf("%q is not an https gateway URL", gw)
+	if err := checkGatewayURL(gw); err != nil {
+		return err
 	}
 	return runProxy(gw, os.Stdin, os.Stdout)
+}
+
+func checkGatewayURL(gw string) error {
+	if u, err := url.Parse(gw); err != nil || u.Scheme != "https" || u.Host == "" {
+		return fmt.Errorf("%q is not an https gateway URL", gw)
+	}
+	return nil
 }
 
 func runProxy(gw string, in io.Reader, out io.Writer) error {
