@@ -98,7 +98,18 @@ func newFakeGateway(t *testing.T) *fakeGateway {
 	orig := openBrowser
 	openBrowser = followRedirect
 	t.Cleanup(func() { openBrowser = orig })
+	if _, err := signInGateway(g.url, ""); err != nil { // as after hush_sign_in
+		t.Fatal(err)
+	}
 	return g
+}
+
+// signOut forgets the saved sign-in, as on a new device.
+func (g *fakeGateway) signOut(t *testing.T) {
+	if err := save(gatewayFile(g.url), GatewayAuth{}); err != nil {
+		t.Fatal(err)
+	}
+	g.signIns = 0
 }
 
 // followRedirect is the "browser": it signs in and follows the redirect back.
@@ -370,11 +381,14 @@ func TestGatewayProxyReportsEarlyEnd(t *testing.T) {
 	}
 }
 
+const signInCall = `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"hush_sign_in"}}` + "\n"
+
 func TestGatewayProxyChecksResource(t *testing.T) {
 	g := newFakeGateway(t)
+	g.signOut(t)
 	g.resource = "https://elsewhere.example/mcp"
 	var out strings.Builder
-	if err := runProxy(g.url, strings.NewReader(session), &out); err != nil {
+	if err := runProxy(g.url, strings.NewReader(session+signInCall), &out); err != nil {
 		t.Fatal(err)
 	}
 	if g.signIns != 0 || !strings.Contains(out.String(), "names another resource") {
@@ -623,8 +637,71 @@ func TestGatewayProxyTokenExpires(t *testing.T) {
 	if got := a.call(40, "ping", `{}`); got != `{"jsonrpc":"2.0","id":40,"result":{"echo":{}}}` {
 		t.Fatalf("got %s", got)
 	}
-	if g.signIns != 1 || g.tokens != 2 {
+	if g.signIns != 1 || g.tokens != 3 { // the sign-in, the proxy's start, the expiry
 		t.Fatalf("%d sign-ins, %d tokens: want a silent refresh", g.signIns, g.tokens)
+	}
+}
+
+// Signed out, the proxy opens no browser by itself: it offers hush_sign_in.
+func TestGatewayProxySignsInOnDemand(t *testing.T) {
+	g := newFakeGateway(t)
+	g.signOut(t)
+	a := launchAgent(t, g.url)
+	defer a.stop()
+	a.send(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}`)
+	if got := a.next(); !strings.Contains(got, `"protocolVersion":"2025-11-25"`) || !strings.Contains(got, "hush_sign_in") {
+		t.Fatalf("initialize: %s", got)
+	}
+	a.send(`{"jsonrpc":"2.0","method":"notifications/initialized"}`)
+	if got := a.call(2, "tools/list", `{}`); !strings.Contains(got, `"tools":[{`) || !strings.Contains(got, `"name":"hush_sign_in"`) {
+		t.Fatalf("tools/list: %s", got)
+	}
+	if got := a.call(3, "tools/call", `{"name":"ok"}`); !strings.Contains(got, `"isError":true`) || !strings.Contains(got, "hush_sign_in") {
+		t.Fatalf("a gateway tool: %s", got)
+	}
+	if g.signIns != 0 {
+		t.Fatal("signed in by itself")
+	}
+	a.send(signInCall)
+	for _, list := range []string{"tools", "prompts", "resources"} {
+		if got := a.next(); got != `{"jsonrpc":"2.0","method":"notifications/`+list+`/list_changed"}` {
+			t.Fatalf("want %s list_changed: %s", list, got)
+		}
+	}
+	if got := a.next(); !strings.Contains(got, `"id":3,"result"`) || !strings.Contains(got, `"isError":false`) {
+		t.Fatalf("hush_sign_in: %s", got)
+	}
+	if got := a.call(4, "tools/list", `{}`); got != `{"jsonrpc":"2.0","id":4,"result":{"tools":[]}}` || g.signIns != 1 {
+		t.Fatalf("%d sign-ins, tools/list: %s", g.signIns, got)
+	}
+}
+
+// A sign-in the gateway stops honoring takes the client back to hush_sign_in.
+func TestGatewayProxySignInExpires(t *testing.T) {
+	g := newFakeGateway(t)
+	a := startAgent(t, g.url)
+	defer a.stop()
+	g.mu.Lock()
+	g.at, g.rt = "", "" // e.g. the user was signed out of the gateway
+	g.mu.Unlock()
+	a.send(`{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"ok"}}`)
+	for _, list := range []string{"tools", "prompts", "resources"} {
+		if got := a.next(); !strings.Contains(got, list+"/list_changed") {
+			t.Fatalf("want %s list_changed: %s", list, got)
+		}
+	}
+	if got := a.next(); !strings.Contains(got, `"id":5,"result"`) || !strings.Contains(got, `"isError":true`) || !strings.Contains(got, "hush_sign_in") {
+		t.Fatalf("call: %s", got)
+	}
+	if got := a.call(6, "tools/list", `{}`); !strings.Contains(got, `"name":"hush_sign_in"`) {
+		t.Fatalf("tools/list: %s", got)
+	}
+	a.send(signInCall)
+	for range 3 {
+		a.next() // list_changed
+	}
+	if got := a.next(); !strings.Contains(got, `"isError":false`) || g.signIns != 2 {
+		t.Fatalf("%d sign-ins, hush_sign_in: %s", g.signIns, got)
 	}
 }
 
@@ -656,11 +733,12 @@ func TestGatewayProxyTwoProcesses(t *testing.T) {
 
 func TestGatewayProxyRefusesNonHTTPS(t *testing.T) {
 	g := newFakeGateway(t)
+	g.signOut(t)
 	g.authorize = "file:///etc/passwd"
 	opened := false
 	openBrowser = func(string) error { opened = true; return nil }
 	var out strings.Builder
-	if err := runProxy(g.url, strings.NewReader(session), &out); err != nil {
+	if err := runProxy(g.url, strings.NewReader(session+signInCall), &out); err != nil {
 		t.Fatal(err)
 	}
 	if opened || !strings.Contains(out.String(), "isn't https") {
