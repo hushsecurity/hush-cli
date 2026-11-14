@@ -39,7 +39,7 @@ For an organization outside the default region, add `--api <your Hush API URL>`
 
 The browser opens your organization's sign-in page; once you sign in, the CLI
 keeps a refresh token in your user config folder (`hush/session.json`).
-`hush logout` removes it.
+`hush logout` removes it, and your gateway sign-ins.
 
 ## Skills
 
@@ -74,6 +74,23 @@ hush skills autosync off
 This adds a `SessionStart` hook to `~/.claude/settings.json` that runs
 `hush skills sync --quiet`. Agents without such hooks share the same skills
 folder, so they pick up what it syncs too; or run `hush skills sync` yourself.
+
+## Gateway
+
+For agents that run local (stdio) MCP servers, such as Claude Desktop's chat,
+`hush gateway proxy` serves a Hush gateway from this device:
+
+```json
+{
+  "mcpServers": {
+    "hush": { "command": "hush", "args": ["gateway", "proxy", "https://<gateway>/mcp"] }
+  }
+}
+```
+
+The first time, it opens your browser to sign in to the gateway, and keeps a
+refresh token in your user config folder (`hush/gateways/`). It uses the
+system's certificates, so TLS-inspecting proxies trusted by the device work.
 
 ## Shell completion
 

@@ -10,11 +10,16 @@ import (
 	"time"
 )
 
+// OAuthClient is a registered public client and its loopback redirect.
+type OAuthClient struct {
+	ClientID    string `json:"client_id"`
+	RedirectURI string `json:"redirect_uri"`
+}
+
 // Session is the saved sign-in.
 type Session struct {
-	API          string `json:"api"`
-	ClientID     string `json:"client_id"`
-	RedirectURI  string `json:"redirect_uri"`
+	API string `json:"api"`
+	OAuthClient
 	RefreshToken string `json:"refresh_token,omitempty"`
 	Org          string `json:"org,omitempty"` // the short name, when login was given it
 }
@@ -71,6 +76,8 @@ func writeJSON(path string, v any, perm os.FileMode) error {
 	return os.Rename(tmp, path)
 }
 
+var errBusy = errors.New("another hush command is running")
+
 var (
 	lockMu   sync.Mutex
 	lockPath string // set while this run holds the lock
@@ -107,7 +114,7 @@ func lockSession() error {
 		if fi, err := os.Stat(path); err == nil && time.Since(fi.ModTime()) > 2*time.Minute {
 			_ = os.Remove(path)
 		} else if time.Now().After(deadline) {
-			return errors.New("another hush command is running")
+			return errBusy
 		}
 	}
 }
