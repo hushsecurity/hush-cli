@@ -87,7 +87,41 @@ your browser the first time. Example, in an agent's MCP config:
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error { return gatewayProxy(args[0]) },
 	})
+
+	var name string
+	install := &cobra.Command{
+		Use:   "install <client> <gateway-url>",
+		Short: "Add a gateway to an agent on this device (supported: claude-desktop)",
+		Long: `Add a gateway to an agent on this device, served by hush gateway proxy.
+
+Supported clients: claude-desktop (its chat). It writes your Claude Desktop
+config, so run it as yourself (not root), ideally while Claude Desktop is
+closed, then open Claude Desktop.`,
+		Example:           "  hush gateway install claude-desktop https://<gateway>/mcp",
+		Args:              cobra.ExactArgs(2),
+		ValidArgsFunction: completeClient,
+		RunE: func(_ *cobra.Command, args []string) error {
+			return installGateway(args[0], args[1], name)
+		},
+	}
+	install.Flags().StringVar(&name, "name", "hush", "the server's name in the client")
+	uninstall := &cobra.Command{
+		Use:               "uninstall <client>",
+		Short:             "Remove a gateway that install added",
+		Args:              cobra.ExactArgs(1),
+		ValidArgsFunction: completeClient,
+		RunE:              func(_ *cobra.Command, args []string) error { return uninstallGateway(args[0], name) },
+	}
+	uninstall.Flags().StringVar(&name, "name", "hush", "the server's name in the client")
+	gw.AddCommand(install, uninstall)
 	return gw
+}
+
+func completeClient(_ *cobra.Command, args []string, _ string) ([]string, cobra.ShellCompDirective) {
+	if len(args) > 0 {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+	return gatewayClients, cobra.ShellCompDirectiveNoFileComp
 }
 
 func skillsCmd() *cobra.Command {

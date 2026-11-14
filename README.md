@@ -78,7 +78,18 @@ folder, so they pick up what it syncs too; or run `hush skills sync` yourself.
 ## Gateway
 
 For agents that run local (stdio) MCP servers, such as Claude Desktop's chat,
-`hush gateway proxy` serves a Hush gateway from this device:
+`hush gateway proxy` serves a Hush gateway from this device. To add it to
+Claude Desktop (run as yourself, then restart Claude Desktop):
+
+```bash
+hush gateway install claude-desktop https://<gateway>/mcp   # --name to rename it
+hush gateway uninstall claude-desktop
+```
+
+From an MDM script running as root, run it as the signed-in user, e.g. on macOS
+`sudo -H -u "$(stat -f %Su /dev/console)" hush gateway install ...`.
+
+Or add it to an agent's MCP config yourself:
 
 ```json
 {
