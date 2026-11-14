@@ -86,8 +86,12 @@ hush gateway install claude-desktop https://<gateway>/mcp   # --name to rename i
 hush gateway uninstall claude-desktop
 ```
 
-From an MDM script running as root, run it as the signed-in user, e.g. on macOS
-`sudo -H -u "$(stat -f %Su /dev/console)" hush gateway install ...`.
+From an MDM script running as root, run it as the signed-in user, e.g. on macOS:
+
+```bash
+user=$(echo "show State:/Users/ConsoleUser" | scutil | awk '/Name :/ && $3 != "loginwindow" { print $3 }')
+sudo -H -u "$user" hush gateway install claude-desktop https://<gateway>/mcp
+```
 
 Or add it to an agent's MCP config yourself:
 
