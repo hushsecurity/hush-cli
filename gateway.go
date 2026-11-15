@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	_ "embed"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -23,8 +24,15 @@ var mcpClient = &http.Client{}
 
 var (
 	errNotSignedIn = errors.New("not signed in")
-	errSignIn      = errors.New("not signed in to the Hush gateway: call the hush_sign_in tool")
+	errSignIn      = errors.New("not signed in to the Hush gateway")
 )
+
+// gatewayTools is what a gateway lists (without output schemas, which may
+// change), offered while signed out: calling one signs in. Clients like Claude
+// Desktop ignore list_changed, so the list mustn't change at sign-in.
+//
+//go:embed gateway_tools.json
+var gatewayTools json.RawMessage
 
 // GatewayAuth is the saved sign-in to one gateway.
 type GatewayAuth struct {
@@ -47,13 +55,16 @@ type proxy struct {
 	session string
 	version string
 	initMsg []byte // replayed when the gateway drops the session
-	// Signed out, the proxy answers the client itself and offers only
-	// hush_sign_in, so the browser opens only when the user wants the gateway.
+	// Signed out, the proxy answers the client itself, and the browser opens
+	// only when a tool is called.
 	signedOut bool
 	meta      string // the gateway's resource metadata URL, for signing in
+	signIns   int    // sign-ins tried, and the last one's error, for calls that waited on it
+	signInErr error
+	cancelled map[string]bool // ids of calls the client cancelled
 
 	authMu   sync.Mutex // one token renewal at a time
-	signInMu sync.Mutex // one hush_sign_in at a time
+	signInMu sync.Mutex // one sign-in at a time
 	initMu   sync.Mutex // one re-initialize at a time
 	outMu    sync.Mutex
 	out      io.Writer
@@ -79,7 +90,7 @@ func checkGatewayURL(gw string) error {
 
 func runProxy(gw string, in io.Reader, out io.Writer) error {
 	ctx, cancel := context.WithCancel(context.Background())
-	p := &proxy{url: gw, out: out, ctx: ctx}
+	p := &proxy{url: gw, out: out, ctx: ctx, cancelled: map[string]bool{}}
 	sc := bufio.NewScanner(in)
 	sc.Buffer(make([]byte, 64<<10), 64<<20)
 	var requests sync.WaitGroup
@@ -92,7 +103,8 @@ func runProxy(gw string, in io.Reader, out io.Writer) error {
 			ID     json.RawMessage `json:"id"`
 			Method string          `json:"method"`
 			Params struct {
-				Name string `json:"name"`
+				Name      string          `json:"name"`
+				RequestID json.RawMessage `json:"requestId"`
 			} `json:"params"`
 		}
 		_ = json.Unmarshal(msg, &head)
@@ -103,22 +115,27 @@ func runProxy(gw string, in io.Reader, out io.Writer) error {
 				id = head.ID
 			}
 		}
+		if head.Method == "notifications/cancelled" && p.isSignedOut() {
+			p.mu.Lock()
+			p.cancelled[string(head.Params.RequestID)] = true
+			p.mu.Unlock()
+		}
 		switch {
 		case head.Method == "initialize": // later requests need its session
 			p.mu.Lock()
 			p.initMsg = msg
 			p.mu.Unlock()
-			if p.handle(msg, id, head.Method, head.Params.Name) {
+			if p.handle(msg, id, head.Method) {
 				p.startStream()
 			}
 		case id != nil: // requests run concurrently; a tool call can take long
 			requests.Add(1)
 			go func() {
 				defer requests.Done()
-				p.handle(msg, id, head.Method, head.Params.Name)
+				p.handle(msg, id, head.Method)
 			}()
 		default: // notifications and responses keep their order
-			p.handle(msg, nil, head.Method, head.Params.Name)
+			p.handle(msg, nil, head.Method)
 		}
 	}
 	requests.Wait()
@@ -139,32 +156,54 @@ func (p *proxy) startStream() {
 }
 
 // handle sends one message; a request that fails gets a JSON-RPC error back.
-func (p *proxy) handle(msg, id json.RawMessage, method, name string) bool {
-	if p.isSignedOut() || method == "tools/call" && name == signInName {
-		p.local(msg, id, method, name)
+// Signed out, a tool call signs in first.
+func (p *proxy) handle(msg, id json.RawMessage, method string) bool {
+	triedSignIn := false
+	var instructions string // the gateway's, which the client hasn't seen
+	for {
+		if p.isSignedOut() {
+			if method != "tools/call" || triedSignIn {
+				p.local(msg, id, method)
+				return false
+			}
+			triedSignIn = true
+			var err error
+			if instructions, err = p.signIn(); err != nil {
+				p.reply(id, toolResult("Couldn't sign in to the Hush gateway: "+err.Error(), true), nil)
+				return false
+			}
+			p.mu.Lock()
+			cancelled := p.cancelled[string(id)]
+			delete(p.cancelled, string(id))
+			p.mu.Unlock()
+			if cancelled { // e.g. it timed out while the user signed in
+				return false
+			}
+		}
+		initialize := method == "initialize"
+		replied := id == nil
+		err := p.send(msg, initialize, func(m []byte) {
+			if !replied && isReplyTo(m, id) {
+				replied = true
+				m = withText(m, instructions)
+			}
+			p.write(m)
+		})
+		if err == nil && !replied {
+			err = errors.New("the gateway ended the reply early")
+		}
+		if err == nil {
+			return true
+		}
+		if errors.Is(err, errSignIn) && !replied {
+			continue // signed out now
+		}
+		logf("%v", err)
+		if id != nil && !replied {
+			p.reply(id, nil, err)
+		}
 		return false
 	}
-	initialize := method == "initialize"
-	replied := id == nil
-	err := p.send(msg, initialize, func(m []byte) {
-		replied = replied || isReplyTo(m, id)
-		p.write(m)
-	})
-	if err == nil && !replied {
-		err = errors.New("the gateway ended the reply early")
-	}
-	if err == nil {
-		return true
-	}
-	if errors.Is(err, errSignIn) && !replied {
-		p.local(msg, id, method, name)
-		return false
-	}
-	logf("%v", err)
-	if id != nil && !replied {
-		p.reply(id, nil, err)
-	}
-	return false
 }
 
 func (p *proxy) reply(id json.RawMessage, result any, err error) {
@@ -185,17 +224,8 @@ func (p *proxy) reply(id json.RawMessage, result any, err error) {
 	p.write(msg)
 }
 
-const signInName = "hush_sign_in"
-
-var signInTool = map[string]any{
-	"name": signInName,
-	"description": "Sign in to the user's Hush gateway, which serves their organization's apps. " +
-		"It opens the browser and returns once the user signed in; the gateway's tools appear then.",
-	"inputSchema": map[string]any{"type": "object"},
-}
-
 // local answers the client while signed out.
-func (p *proxy) local(msg, id json.RawMessage, method, name string) {
+func (p *proxy) local(msg, id json.RawMessage, method string) {
 	if id == nil {
 		return // notifications are dropped
 	}
@@ -218,25 +248,21 @@ func (p *proxy) local(msg, id json.RawMessage, method, name string) {
 			"capabilities":    map[string]any{"tools": listChanged, "prompts": listChanged, "resources": listChanged},
 			"serverInfo":      map[string]string{"name": "hush", "version": version},
 			"instructions": "This server is the user's Hush gateway, which serves their organization's apps. " +
-				"While hush_sign_in is among its tools, the user isn't signed in: call it when they ask " +
-				"for something from those apps. Then use the gateway's tools, starting with hush_list_apps.",
+				"When the user asks for something from those apps, use its tools, starting with hush_list_apps. " +
+				"If they aren't signed in yet, that first call opens the browser to sign in.",
 		}
 	case "ping":
 		result = struct{}{}
 	case "tools/list":
-		result = map[string]any{"tools": []any{signInTool}}
+		result = gatewayTools
 	case "prompts/list":
 		result = map[string]any{"prompts": []any{}}
 	case "resources/list":
 		result = map[string]any{"resources": []any{}}
 	case "resources/templates/list":
 		result = map[string]any{"resourceTemplates": []any{}}
-	case "tools/call":
-		if name == signInName {
-			result = p.signInResult()
-		} else {
-			result = toolResult(errSignIn.Error(), true)
-		}
+	case "tools/call": // reached only after a sign-in
+		result = toolResult("The Hush gateway refused the new sign-in.", true)
 	}
 	if result == nil {
 		p.reply(id, nil, errSignIn)
@@ -245,33 +271,57 @@ func (p *proxy) local(msg, id json.RawMessage, method, name string) {
 	p.reply(id, result, nil)
 }
 
-func toolResult(text string, isError bool) any {
-	return map[string]any{"isError": isError, "content": []any{map[string]string{"type": "text", "text": text}}}
+// withText adds text to a tool result's content.
+func withText(msg []byte, text string) []byte {
+	var m struct {
+		JSONRPC string          `json:"jsonrpc"`
+		ID      json.RawMessage `json:"id"`
+		Result  map[string]any  `json:"result"`
+	}
+	d := json.NewDecoder(bytes.NewReader(msg))
+	d.UseNumber()
+	if text == "" || d.Decode(&m) != nil {
+		return msg
+	}
+	content, ok := m.Result["content"].([]any)
+	if !ok {
+		return msg
+	}
+	m.Result["content"] = append(content, map[string]string{"type": "text", "text": text})
+	out, err := json.Marshal(m)
+	if err != nil {
+		return msg
+	}
+	return out
 }
 
-func (p *proxy) signInResult() any {
-	instructions, err := p.signIn()
-	if err != nil {
-		return toolResult("Couldn't sign in to the Hush gateway: "+err.Error(), true)
-	}
-	text := "Signed in to the Hush gateway. Its tools are listed now, or from the user's next message."
-	if instructions != "" { // the client only saw ours, from before
-		text += "\n\nThe gateway's instructions:\n" + instructions
-	}
-	return toolResult(text, false)
+func toolResult(text string, isError bool) any {
+	return map[string]any{"isError": isError, "content": []any{map[string]string{"type": "text", "text": text}}}
 }
 
 // signIn takes up a newer sign-in another proxy saved, or signs in in the
 // browser, then starts the client's session on the gateway and returns its
 // instructions.
-func (p *proxy) signIn() (string, error) {
-	if !p.signInMu.TryLock() { // a retry mustn't open a second browser later
-		return "", errors.New("a sign-in is already open in the browser; finish it there")
-	}
+func (p *proxy) signIn() (instructions string, err error) {
+	p.mu.Lock()
+	tried := p.signIns
+	p.mu.Unlock()
+	p.signInMu.Lock()
 	defer p.signInMu.Unlock()
+	p.mu.Lock()
+	waited, lastErr := p.signIns != tried, p.signInErr
+	p.mu.Unlock()
+	if waited { // on another call's sign-in: share its outcome, opening no second browser
+		return "", lastErr
+	}
 	if !p.isSignedOut() {
 		return "", nil
 	}
+	defer func() {
+		p.mu.Lock()
+		p.signIns, p.signInErr = p.signIns+1, err
+		p.mu.Unlock()
+	}()
 	p.authMu.Lock()
 	tok, err := refreshGateway(p.url)
 	var bad *statusError
@@ -290,7 +340,6 @@ func (p *proxy) signIn() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	var instructions string
 	p.mu.Lock()
 	initMsg := p.initMsg
 	p.mu.Unlock()
@@ -315,17 +364,20 @@ func (p *proxy) signIn() (string, error) {
 	p.mu.Lock()
 	p.signedOut = false
 	p.mu.Unlock()
-	p.listChanged()
+	p.listChanged() // for clients that refresh the gateway's live list
+	if instructions != "" {
+		instructions = "The Hush gateway's instructions:\n" + instructions
+	}
 	return instructions, nil
 }
 
-// signOut drops a sign-in the gateway refused; the client then sees only hush_sign_in.
+// signOut drops a sign-in the gateway refused; the next tool call signs in again.
 func (p *proxy) signOut(meta string) {
 	p.mu.Lock()
 	inSession := p.session != ""
 	p.signedOut, p.meta, p.token, p.session = true, meta, "", ""
 	p.mu.Unlock()
-	logf("not signed in to the gateway; waiting for hush_sign_in")
+	logf("not signed in to the gateway; the next tool call signs in")
 	if inSession {
 		p.listChanged()
 	}
@@ -629,7 +681,7 @@ func (p *proxy) authorize(used, meta string, refused bool) error {
 	if tok, _ := p.state(); tok != used { // another request already did it
 		return nil
 	}
-	if p.isSignedOut() { // only hush_sign_in signs back in
+	if p.isSignedOut() { // only a tool call signs back in
 		return errSignIn
 	}
 	if !refused {
