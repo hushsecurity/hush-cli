@@ -4,7 +4,23 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    commit-message:
+      prefix: "HUSH-777 "
+    groups:
+      actions:
+        patterns:
+          - "*"
   - package-ecosystem: gomod
     directory: /
     schedule:
       interval: weekly
+    commit-message:
+      prefix: "HUSH-777 "
+    groups:
+      go-deps:
+        patterns:
+          - "*"
+      go-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
