@@ -1,4 +1,4 @@
-package main
+package gateway
 
 import (
 	"errors"
@@ -7,14 +7,16 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/hushsecurity/hush-cli/internal/config"
 )
 
-// gatewayClients are the agents gateway install can set up.
-var gatewayClients = []string{"claude-desktop"}
+// Clients are the agents Install can set up.
+var Clients = []string{"claude-desktop"}
 
 func checkClient(client string) error {
 	if client != "claude-desktop" {
-		return fmt.Errorf("unknown client %q (supported: %v)", client, gatewayClients)
+		return fmt.Errorf("unknown client %q (supported: %v)", client, Clients)
 	}
 	if os.Geteuid() == 0 { // root's config isn't the user's (-1 on Windows)
 		return errors.New("run it as the user, not root (e.g. sudo -H -u <user>)")
@@ -22,15 +24,15 @@ func checkClient(client string) error {
 	return nil
 }
 
-// installGateway adds the gateway, served by gateway proxy, to Claude Desktop.
-func installGateway(client, gw, name string) error {
+// Install adds the gateway, served by gateway proxy, to Claude Desktop.
+func Install(client, gw, name string) error {
 	if err := checkClient(client); err != nil {
 		return err
 	}
 	if err := checkGatewayURL(gw); err != nil {
 		return err
 	}
-	server := map[string]any{"command": hushExe(), "args": []string{"gateway", "proxy", gw}}
+	server := map[string]any{"command": config.Executable(), "args": []string{"gateway", "proxy", gw}}
 	return editDesktopServers(func(servers map[string]any) (bool, error) {
 		if old, ok := servers[name]; ok && !isProxy(old) {
 			return false, fmt.Errorf("it already has a server named %s; pick another --name", name)
@@ -40,7 +42,7 @@ func installGateway(client, gw, name string) error {
 	}, "Added "+name+" to")
 }
 
-func uninstallGateway(client, name string) error {
+func Uninstall(client, name string) error {
 	if err := checkClient(client); err != nil {
 		return err
 	}
@@ -68,7 +70,7 @@ func editDesktopServers(edit func(map[string]any) (bool, error), done string) er
 	}
 	anyChanged := false
 	for _, path := range paths {
-		changed, err := editJSON(path, func(cfg map[string]any) (bool, error) {
+		changed, err := config.EditJSON(path, func(cfg map[string]any) (bool, error) {
 			servers, ok := cfg["mcpServers"].(map[string]any)
 			if !ok && cfg["mcpServers"] != nil {
 				return false, errors.New("its mcpServers isn't an object")

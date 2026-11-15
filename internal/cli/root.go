@@ -1,4 +1,5 @@
-package main
+// Package cli is the hush command line.
+package cli
 
 import (
 	"fmt"
@@ -9,20 +10,24 @@ import (
 	"syscall"
 
 	"github.com/spf13/cobra"
+
+	"github.com/hushsecurity/hush-cli/internal/auth"
+	"github.com/hushsecurity/hush-cli/internal/config"
+	"github.com/hushsecurity/hush-cli/internal/gateway"
+	"github.com/hushsecurity/hush-cli/internal/skills"
+	"github.com/hushsecurity/hush-cli/internal/version"
 )
 
-var version = "dev" // set at build time
-
-func main() {
+func Main() {
 	go func() {
 		sig := make(chan os.Signal, 1)
 		signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 		s := <-sig
-		releaseLock()
+		config.ReleaseLock()
 		os.Exit(128 + int(s.(syscall.Signal))) // 130 for Ctrl-C, 143 for SIGTERM
 	}()
 	err := rootCmd().Execute()
-	releaseLock()
+	config.ReleaseLock()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
@@ -33,7 +38,7 @@ func rootCmd() *cobra.Command {
 	root := &cobra.Command{
 		Use:           "hush",
 		Short:         "The Hush Security command line interface",
-		Version:       version,
+		Version:       version.Version,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
@@ -45,7 +50,7 @@ func rootCmd() *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE:  func(*cobra.Command, []string) error { return login(api, org) },
 	}
-	loginCmd.Flags().StringVar(&api, "api", "", "Hush API URL (default "+defaultAPI+", or $HUSH_API_URL)")
+	loginCmd.Flags().StringVar(&api, "api", "", "Hush API URL (default "+auth.DefaultAPI+", or $HUSH_API_URL)")
 	loginCmd.Flags().StringVar(&org, "org", "", "your organization's short name, to skip choosing it")
 
 	root.AddCommand(loginCmd,
@@ -65,7 +70,7 @@ func rootCmd() *cobra.Command {
 			Use:   "version",
 			Short: "Print the version",
 			Args:  cobra.NoArgs,
-			Run:   func(*cobra.Command, []string) { fmt.Println(version) },
+			Run:   func(*cobra.Command, []string) { fmt.Println(version.Version) },
 		},
 		skillsCmd(),
 		gatewayCmd(),
@@ -86,7 +91,7 @@ agent's MCP config:
 
   "hush": {"command": "hush", "args": ["gateway", "proxy", "https://<gateway>/mcp"]}`,
 		Args: cobra.ExactArgs(1),
-		RunE: func(_ *cobra.Command, args []string) error { return gatewayProxy(args[0]) },
+		RunE: func(_ *cobra.Command, args []string) error { return gateway.Proxy(args[0]) },
 	})
 
 	var name string
@@ -102,7 +107,7 @@ closed, then open Claude Desktop.`,
 		Args:              cobra.ExactArgs(2),
 		ValidArgsFunction: completeClient,
 		RunE: func(_ *cobra.Command, args []string) error {
-			return installGateway(args[0], args[1], name)
+			return gateway.Install(args[0], args[1], name)
 		},
 	}
 	install.Flags().StringVar(&name, "name", "hush", "the server's name in the client")
@@ -111,7 +116,7 @@ closed, then open Claude Desktop.`,
 		Short:             "Remove a gateway that install added",
 		Args:              cobra.ExactArgs(1),
 		ValidArgsFunction: completeClient,
-		RunE:              func(_ *cobra.Command, args []string) error { return uninstallGateway(args[0], name) },
+		RunE:              func(_ *cobra.Command, args []string) error { return gateway.Uninstall(args[0], name) },
 	}
 	uninstall.Flags().StringVar(&name, "name", "hush", "the server's name in the client")
 	gw.AddCommand(install, uninstall)
@@ -122,11 +127,11 @@ func completeClient(_ *cobra.Command, args []string, _ string) ([]string, cobra.
 	if len(args) > 0 {
 		return nil, cobra.ShellCompDirectiveNoFileComp
 	}
-	return gatewayClients, cobra.ShellCompDirectiveNoFileComp
+	return gateway.Clients, cobra.ShellCompDirectiveNoFileComp
 }
 
 func skillsCmd() *cobra.Command {
-	skills := &cobra.Command{Use: "skills", Short: "Install the skills your organization assigned to you"}
+	cmd := &cobra.Command{Use: "skills", Short: "Install the skills your organization assigned to you"}
 
 	var asJSON bool
 	list := &cobra.Command{
@@ -134,7 +139,7 @@ func skillsCmd() *cobra.Command {
 		Aliases: []string{"ls"},
 		Short:   "List your skills, and what's installed",
 		Args:    cobra.NoArgs,
-		RunE:    func(*cobra.Command, []string) error { return listSkills(asJSON) },
+		RunE:    func(*cobra.Command, []string) error { return skills.List(asJSON) },
 	}
 	list.Flags().BoolVar(&asJSON, "json", false, "print JSON")
 
@@ -147,25 +152,25 @@ func skillsCmd() *cobra.Command {
 			if quiet {
 				os.Stdout, _ = os.OpenFile(os.DevNull, os.O_WRONLY, 0) // errors go to stderr
 			}
-			return syncSkills("")
+			return skills.Sync("")
 		},
 	}
 	sync.Flags().BoolVarP(&quiet, "quiet", "q", false, "print nothing but errors")
 
-	skills.AddCommand(list, sync,
+	cmd.AddCommand(list, sync,
 		&cobra.Command{
 			Use:               "show <name>",
 			Short:             "Show a skill and its SKILL.md",
 			Args:              cobra.ExactArgs(1),
 			ValidArgsFunction: completeSkills,
-			RunE:              func(_ *cobra.Command, args []string) error { return showSkill(args[0]) },
+			RunE:              func(_ *cobra.Command, args []string) error { return skills.Show(args[0]) },
 		},
 		&cobra.Command{
 			Use:               "add <name>",
 			Short:             "Install one skill (again, if you removed it)",
 			Args:              cobra.ExactArgs(1),
 			ValidArgsFunction: completeSkills,
-			RunE:              func(_ *cobra.Command, args []string) error { return syncSkills(args[0]) },
+			RunE:              func(_ *cobra.Command, args []string) error { return skills.Sync(args[0]) },
 		},
 		&cobra.Command{
 			Use:               "remove <name>",
@@ -173,7 +178,7 @@ func skillsCmd() *cobra.Command {
 			Short:             "Uninstall a skill, and keep sync from reinstalling it",
 			Args:              cobra.ExactArgs(1),
 			ValidArgsFunction: completeSkills,
-			RunE:              func(_ *cobra.Command, args []string) error { return removeSkill(args[0]) },
+			RunE:              func(_ *cobra.Command, args []string) error { return skills.Remove(args[0]) },
 		},
 		&cobra.Command{
 			Use:       "autosync [on|off]",
@@ -181,17 +186,17 @@ func skillsCmd() *cobra.Command {
 			Args:      cobra.MatchAll(cobra.MaximumNArgs(1), cobra.OnlyValidArgs),
 			ValidArgs: []string{"on", "off"},
 			RunE: func(_ *cobra.Command, args []string) error {
-				return autosync(append(args, "")[0])
+				return skills.Autosync(append(args, "")[0])
 			},
 		},
 	)
-	return skills
+	return cmd
 }
 
 // completeSkills completes skill names from what's installed or removed
 // locally, so pressing tab never waits on the network.
 func completeSkills(_ *cobra.Command, args []string, _ string) ([]string, cobra.ShellCompDirective) {
-	m, err := loadManifest()
+	m, err := skills.LoadManifest()
 	if len(args) > 0 || err != nil {
 		return nil, cobra.ShellCompDirectiveNoFileComp
 	}

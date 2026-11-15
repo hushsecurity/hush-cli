@@ -3,14 +3,15 @@ project_name: hush
 
 before:
   hooks:
-    - sh -c 'mkdir -p completions && for sh in bash zsh fish; do go run . completion $sh > completions/hush.$sh; done'
+    - sh -c 'mkdir -p completions && for sh in bash zsh fish; do go run ./cmd/hush completion $sh > completions/hush.$sh; done'
 
 builds:
-  - binary: hush
+  - main: ./cmd/hush
+    binary: hush
     env: [CGO_ENABLED=0]
     goos: [linux, darwin, windows]
     goarch: [amd64, arm64]
-    ldflags: ["-s -w -X main.version={{ .Version }}"]
+    ldflags: ["-s -w -X github.com/hushsecurity/hush-cli/internal/version.Version={{ .Version }}"]
 
 archives:
   - name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"

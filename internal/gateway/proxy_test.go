@@ -1,4 +1,4 @@
-package main
+package gateway
 
 import (
 	"bufio"
@@ -17,6 +17,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/hushsecurity/hush-cli/internal/config"
+	"github.com/hushsecurity/hush-cli/internal/oauth"
 )
 
 // fakeGateway is an MCP endpoint that wants a bearer token, with its
@@ -83,7 +86,7 @@ func newFakeGateway(t *testing.T) *fakeGateway {
 			}
 			g.tokens++ // single-use refresh tokens, and only the newest access token works
 			g.at, g.rt = fmt.Sprintf("at%d", g.tokens), fmt.Sprintf("rt%d", g.tokens)
-			_ = json.NewEncoder(w).Encode(token{AccessToken: g.at, RefreshToken: g.rt})
+			_ = json.NewEncoder(w).Encode(oauth.Token{AccessToken: g.at, RefreshToken: g.rt})
 		default:
 			http.NotFound(w, r)
 		}
@@ -95,9 +98,9 @@ func newFakeGateway(t *testing.T) *fakeGateway {
 	for _, env := range []string{"HOME", "USERPROFILE", "XDG_CONFIG_HOME", "AppData"} {
 		t.Setenv(env, home)
 	}
-	orig := openBrowser
-	openBrowser = followRedirect
-	t.Cleanup(func() { openBrowser = orig })
+	orig := oauth.OpenBrowser
+	oauth.OpenBrowser = followRedirect
+	t.Cleanup(func() { oauth.OpenBrowser = orig })
 	if _, err := signInGateway(g.url, ""); err != nil { // as after hush_sign_in
 		t.Fatal(err)
 	}
@@ -106,7 +109,7 @@ func newFakeGateway(t *testing.T) *fakeGateway {
 
 // signOut forgets the saved sign-in, as on a new device.
 func (g *fakeGateway) signOut(t *testing.T) {
-	if err := save(gatewayFile(g.url), GatewayAuth{}); err != nil {
+	if err := config.Save(authFile(g.url), Auth{}); err != nil {
 		t.Fatal(err)
 	}
 	g.signIns = 0
@@ -285,8 +288,8 @@ func TestGatewayProxy(t *testing.T) {
 	if out.String() != sessionOut {
 		t.Fatalf("out:\n%s\nwant:\n%s", out.String(), sessionOut)
 	}
-	var a GatewayAuth
-	if err := load(gatewayFile(g.url), &a); err != nil || a.RefreshToken != g.rt || a.ClientID != "c1" {
+	var a Auth
+	if err := config.Load(authFile(g.url), &a); err != nil || a.RefreshToken != g.rt || a.ClientID != "c1" {
 		t.Fatalf("saved %+v, %v", a, err)
 	}
 
@@ -446,7 +449,7 @@ func TestHelperProxy(t *testing.T) {
 	if gw == "" {
 		t.Skip("runs as a proxy process for startProcess")
 	}
-	openBrowser = followRedirect
+	oauth.OpenBrowser = followRedirect
 	if err := runProxy(gw, os.Stdin, os.Stdout); err != nil {
 		os.Exit(1)
 	}
@@ -695,7 +698,7 @@ func TestGatewayProxyCallsShareFailedSignIn(t *testing.T) {
 	g := newFakeGateway(t)
 	g.signOut(t)
 	opened := 0
-	openBrowser = func(u string) error {
+	oauth.OpenBrowser = func(u string) error {
 		opened++
 		go func() {
 			time.Sleep(50 * time.Millisecond) // the second call waits meanwhile
@@ -725,7 +728,7 @@ func TestGatewayProxyCallsShareFailedSignIn(t *testing.T) {
 func TestGatewayProxyDropsCancelledCall(t *testing.T) {
 	g := newFakeGateway(t)
 	g.signOut(t)
-	openBrowser = func(u string) error {
+	oauth.OpenBrowser = func(u string) error {
 		go func() {
 			time.Sleep(50 * time.Millisecond) // the client cancels meanwhile
 			_ = followRedirect(u)
@@ -794,7 +797,7 @@ func TestGatewayProxyRefusesNonHTTPS(t *testing.T) {
 	g.signOut(t)
 	g.authorize = "file:///etc/passwd"
 	opened := false
-	openBrowser = func(string) error { opened = true; return nil }
+	oauth.OpenBrowser = func(string) error { opened = true; return nil }
 	var out strings.Builder
 	if err := runProxy(g.url, strings.NewReader(session+toolCall), &out); err != nil {
 		t.Fatal(err)
@@ -816,16 +819,16 @@ func TestGatewayProxyRequestIsNotReply(t *testing.T) {
 	}
 }
 
-func TestLogoutForgetsGateways(t *testing.T) {
+func TestForgetAll(t *testing.T) {
 	g := newFakeGateway(t)
 	if err := runProxy(g.url, strings.NewReader(session), io.Discard); err != nil {
 		t.Fatal(err)
 	}
-	if err := logout(); err != nil {
+	if err := ForgetAll(); err != nil {
 		t.Fatal(err)
 	}
-	var a GatewayAuth
-	if err := load(gatewayFile(g.url), &a); err != nil || a.RefreshToken != "" {
+	var a Auth
+	if err := config.Load(authFile(g.url), &a); err != nil || a.RefreshToken != "" {
 		t.Fatalf("still signed in to the gateway: %+v, %v", a, err)
 	}
 }

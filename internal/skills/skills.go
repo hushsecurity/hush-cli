@@ -1,4 +1,5 @@
-package main
+// Package skills installs the user's assigned skills for their agents.
+package skills
 
 import (
 	"crypto/sha256"
@@ -13,6 +14,10 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+
+	"github.com/hushsecurity/hush-cli/internal/auth"
+	"github.com/hushsecurity/hush-cli/internal/config"
+	"github.com/hushsecurity/hush-cli/internal/httpx"
 )
 
 const manifestFile = "skills.json"
@@ -26,14 +31,14 @@ var linkedClients = []struct{ name, dir string }{
 }
 
 type Skill struct {
-	ID          string      `json:"id"`
-	Name        string      `json:"name"`
-	Description string      `json:"description"`
-	Version     int         `json:"version"`
-	Files       []SkillFile `json:"files"`
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Version     int    `json:"version"`
+	Files       []File `json:"files"`
 }
 
-type SkillFile struct {
+type File struct {
 	Path   string `json:"path"`
 	Digest string `json:"digest"`
 	Size   int    `json:"size"`
@@ -46,9 +51,9 @@ type Manifest struct {
 	Removed   []string             `json:"removed,omitempty"`
 }
 
-func loadManifest() (*Manifest, error) {
+func LoadManifest() (*Manifest, error) {
 	m := &Manifest{}
-	if err := load(manifestFile, m); err != nil {
+	if err := config.Load(manifestFile, m); err != nil {
 		return nil, err
 	}
 	if m.Installed == nil {
@@ -64,9 +69,9 @@ type Installed struct {
 	Links   []string `json:"links,omitempty"`
 }
 
-func fetchSkills(c *Client) ([]Skill, error) {
+func fetchSkills(c *auth.Client) ([]Skill, error) {
 	var skills []Skill
-	return skills, c.getJSON("/v1/skills/me", &skills)
+	return skills, c.GetJSON("/v1/skills/me", &skills)
 }
 
 type skillRow struct {
@@ -77,8 +82,8 @@ type skillRow struct {
 	State       string `json:"state"`
 }
 
-func listSkills(asJSON bool) error {
-	c, err := signedIn()
+func List(asJSON bool) error {
+	c, err := auth.SignedIn()
 	if err != nil {
 		return err
 	}
@@ -86,7 +91,7 @@ func listSkills(asJSON bool) error {
 	if err != nil {
 		return err
 	}
-	m, err := loadManifest()
+	m, err := LoadManifest()
 	if err != nil {
 		return err
 	}
@@ -133,9 +138,9 @@ func truncate(s string, n int) string {
 	return s
 }
 
-// showSkill prints a skill's details and its SKILL.md.
-func showSkill(name string) error {
-	c, err := signedIn()
+// Show prints a skill's details and its SKILL.md.
+func Show(name string) error {
+	c, err := auth.SignedIn()
 	if err != nil {
 		return err
 	}
@@ -162,9 +167,9 @@ func showSkill(name string) error {
 	return nil
 }
 
-// syncSkills installs every assigned skill but those the user removed, or
+// Sync installs every assigned skill but those the user removed, or
 // with `only`, just that one (adding it back), and removes unassigned ones.
-func syncSkills(only string) error {
+func Sync(only string) error {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return err
@@ -177,7 +182,7 @@ func syncSkills(only string) error {
 		}
 	}
 
-	c, err := signedIn()
+	c, err := auth.SignedIn()
 	if err != nil {
 		return err
 	}
@@ -189,7 +194,7 @@ func syncSkills(only string) error {
 		return fmt.Errorf("skill %q is not assigned to you", only)
 	}
 
-	m, err := loadManifest()
+	m, err := LoadManifest()
 	if err != nil {
 		return err
 	}
@@ -215,7 +220,7 @@ func syncSkills(only string) error {
 			failed++
 		}
 		// Saved per skill, so an interrupted run doesn't leave untracked ones.
-		if err := save(manifestFile, m); err != nil {
+		if err := config.Save(manifestFile, m); err != nil {
 			return err
 		}
 	}
@@ -226,7 +231,7 @@ func syncSkills(only string) error {
 			}
 		}
 	}
-	if err := save(manifestFile, m); err != nil {
+	if err := config.Save(manifestFile, m); err != nil {
 		return err
 	}
 	if failed > 0 {
@@ -246,7 +251,7 @@ func hasSkill(skills []Skill, name string) bool {
 
 // installSkill puts the skill in the shared folder; it reports whether it
 // changed anything.
-func installSkill(c *Client, dir string, s Skill, manifest map[string]Installed) (bool, error) {
+func installSkill(c *auth.Client, dir string, s Skill, manifest map[string]Installed) (bool, error) {
 	if !filepath.IsLocal(s.Name) || strings.ContainsAny(s.Name, `/\`) || strings.HasPrefix(s.Name, ".") {
 		return false, fmt.Errorf("unsafe name %q", s.Name)
 	}
@@ -273,7 +278,7 @@ func installSkill(c *Client, dir string, s Skill, manifest map[string]Installed)
 		if err := download(c, s, f.Path, f.Digest, tmp); err != nil {
 			return false, err
 		}
-		touchLock()
+		config.TouchLock()
 	}
 	if err := os.RemoveAll(dest); err != nil {
 		return false, err
@@ -319,7 +324,7 @@ func linkSkill(shared, dir, name string, changed bool, manifest map[string]Insta
 	return nil
 }
 
-func download(c *Client, s Skill, path, digest, root string) error {
+func download(c *auth.Client, s Skill, path, digest, root string) error {
 	rel := filepath.FromSlash(path)
 	if !filepath.IsLocal(rel) {
 		return fmt.Errorf("unsafe file path %q", path)
@@ -336,13 +341,13 @@ func download(c *Client, s Skill, path, digest, root string) error {
 }
 
 // fetchFile downloads a skill file and checks it against its digest.
-func fetchFile(c *Client, s Skill, digest string) ([]byte, error) {
-	resp, err := c.get(fmt.Sprintf("/v1/skills/me/%s/files/%s", s.ID, digest))
+func fetchFile(c *auth.Client, s Skill, digest string) ([]byte, error) {
+	resp, err := c.Get(fmt.Sprintf("/v1/skills/me/%s/files/%s", s.ID, digest))
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
-	if err := checkStatus(resp); err != nil {
+	if err := httpx.CheckStatus(resp); err != nil {
 		return nil, err
 	}
 	data, err := io.ReadAll(resp.Body)
@@ -355,16 +360,16 @@ func fetchFile(c *Client, s Skill, digest string) ([]byte, error) {
 	return data, nil
 }
 
-// removeSkill uninstalls a skill and keeps sync from installing it again.
-func removeSkill(name string) error {
-	if err := lockSession(); err != nil {
+// Remove uninstalls a skill and keeps sync from installing it again.
+func Remove(name string) error {
+	if err := config.Lock(); err != nil {
 		return err
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return err
 	}
-	m, err := loadManifest()
+	m, err := LoadManifest()
 	if err != nil {
 		return err
 	}
@@ -378,7 +383,7 @@ func removeSkill(name string) error {
 	if !slices.Contains(m.Removed, name) {
 		m.Removed = append(m.Removed, name)
 	}
-	return save(manifestFile, m)
+	return config.Save(manifestFile, m)
 }
 
 // uninstall deletes a skill hush installed, and its links.
