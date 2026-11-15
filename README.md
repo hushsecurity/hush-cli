@@ -103,11 +103,10 @@ Or add it to an agent's MCP config yourself:
 }
 ```
 
-Until you sign in to the gateway, it offers one tool, `hush_sign_in`; the
-browser opens only when the agent calls it, i.e. when you ask for something
-from the gateway. It keeps a refresh token in your user config folder
-(`hush/gateways/`). It uses the
-system's certificates, so TLS-inspecting proxies trusted by the device work.
+Nothing opens at startup: the browser opens to sign in to the gateway when the
+agent first calls one of its tools, i.e. when you ask for something from it.
+It keeps a refresh token in your user config folder (`hush/gateways/`). It uses
+the system's certificates, so TLS-inspecting proxies trusted by the device work.
 
 ## Shell completion
 

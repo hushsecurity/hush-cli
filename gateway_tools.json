@@ -1,0 +1,282 @@
+{
+  "tools": [
+    {
+      "name": "hush_call_tool",
+      "description": "Run a tool discovered via hush_search_tools that isn't in your visible tool list. Pass the tool's name exactly as hush_search_tools returned it — copy it verbatim. Do not shorten it, drop a leading segment, or otherwise edit the name; a modified name is a different tool and will fail. Pass its arguments matching the input schema that hush_search_tools returned.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Exact tool name from hush_search_tools, copied verbatim. Do not shorten it, drop a leading segment, or otherwise modify it."
+          },
+          "arguments": {
+            "type": "object",
+            "description": "Arguments for that tool.",
+            "additionalProperties": true
+          }
+        },
+        "required": [
+          "name"
+        ]
+      },
+      "annotations": {
+        "title": "Call a discovered tool",
+        "openWorldHint": true
+      }
+    },
+    {
+      "name": "hush_connect",
+      "description": "Authorize Hush to call an app on the user's behalf. Required before any of that app's tools (issues, projects, repos, etc.) become available through this MCP server. Returns a short-lived consent URL the user must open in their browser; present it as a clickable link, copying the URL exactly — do not retype or line-wrap it. Once connected, call hush_search_tools to discover that app's tools.",
+      "inputSchema": {
+        "properties": {
+          "app": {
+            "description": "Name of the app to connect. Use the exact name hush_list_apps reports.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "app"
+        ],
+        "type": "object"
+      },
+      "annotations": {
+        "title": "Connect an app",
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true
+      }
+    },
+    {
+      "name": "hush_disconnect",
+      "description": "Revoke the authorization that lets Hush call an app on the user's behalf. That app's tools stop being available through this MCP server until the user connects again. Call this only when the user explicitly asks to disconnect an app.",
+      "inputSchema": {
+        "properties": {
+          "app": {
+            "description": "Name of the app to disconnect. Use the exact name hush_list_apps reports.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "app"
+        ],
+        "type": "object"
+      },
+      "annotations": {
+        "title": "Disconnect an app",
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "hush_get_skill",
+      "description": "Load one of your organization's skills (instructions for a specific task) by name and follow its SKILL.md before doing that task. Pass `path` to read a file the skill references (e.g. `references/postgres.md`). Omit `name` to list the skills.",
+      "inputSchema": {
+        "properties": {
+          "name": {
+            "description": "Skill name, as listed. Omit to list skills.",
+            "type": "string"
+          },
+          "path": {
+            "description": "File within the skill. Omit for SKILL.md.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "annotations": {
+        "title": "Get skill",
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "hush_list_apps",
+      "description": "List every app available through this MCP server, and for each whether the user is assigned to it and whether it is connected (authorized to be called on the user's behalf). Use this to check an app's availability before assuming its tools exist. For `connected` and `not_required` apps (`not_required` means the app needs no user authorization), use hush_search_tools to discover their tools. `disconnected` apps must first be connected with hush_connect before their tools become available. `invalid` apps were connected but authorization no longer works, for any reason (e.g. the refresh token was revoked, or the app's credentials were rotated); their tools are unavailable until the user reconnects with hush_connect. `user_required` apps need a user's authorization, which an agent acting on its own can't give; it can use them only when acting for a user. `unavailable` apps can't be used right now: the gateway hasn't checked their server yet, can't reach or authorize to it, or the server refuses callers; `reason` gives the cause. The gateway checks again every few minutes; if an app stays unavailable, an admin needs to fix it.",
+      "inputSchema": {
+        "properties": {
+          "app": {
+            "description": "Optional: name of a single app to report on. Omit to list all apps.",
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "annotations": {
+        "title": "List apps",
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "hush_reauth",
+      "description": "Internal: refresh the hush session token's claims — app assignments and consent approvals. Call silently — do not narrate the refresh to the user. Use after a consent approval or when a block message says your assignment may be stale; then retry the original tool call. Policy changes don't need it: they apply immediately, so a plain retry of the blocked call is enough.",
+      "inputSchema": {
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "annotations": {
+        "title": "Session refresh",
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "hush_request_access",
+      "description": "Submit a request to grant the current user access to an app they can't currently use. Call this only when a block message tells you to request access, and only once the user has explicitly asked to request access. Generate a short, specific `justification` describing why the user needs that app right now, based on the current task. Write the justification as if the user is reading it — the MCP client may surface the call for approval before it runs.",
+      "inputSchema": {
+        "properties": {
+          "app": {
+            "description": "Name of the app the user needs access to. Use the exact name from the block message.",
+            "type": "string"
+          },
+          "justification": {
+            "description": "Short, specific text describing why the user needs that app right now. Derived from the current task. The user sees this string in the tool-call approval and submits it as-is.",
+            "type": "string"
+          },
+          "kind": {
+            "description": "What's missing: \"assignment\" (user is not assigned to the app) or \"agent_type\" (the user's agent type is not permitted for the app). Use the value from the block message.",
+            "enum": [
+              "assignment",
+              "agent_type"
+            ],
+            "type": "string"
+          },
+          "tool": {
+            "description": "For a database block only: the tool name from the block message, so the admin knows which tool prompted the request. Pass it exactly as given; omit for non-database apps.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "app",
+          "kind"
+        ],
+        "type": "object"
+      },
+      "annotations": {
+        "title": "Request access",
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "hush_request_user_consent",
+      "description": "Ask the user to consent to one or more tool calls that their organization's policy gated behind explicit approval. Call this as soon as a tool is blocked, naming that tool, plus every other gated tool on the app the task still needs, so the user approves once instead of per tool. Leave `consent_method` out to reach the user the way they usually approve; pass one only when the user picked it from user_consent_methods. If they ask for a way that tool does not list, tell them and ask which listed one they want rather than picking for them. Do not ask the user how they want to approve unless this tool says they need to pick. Returns a request id and an expiry, and sometimes a consent URL; present any URL to the user as a clickable link to open in their browser, copying it exactly — do not retype or line-wrap it. With a URL, tell the user the URL and end your turn without calling user_consent_status; check it once when the user says they approved. Without one, call the user_consent_status tool with the request id and wait=true until it resolves, before refreshing the token: on granted, refresh session and retry the original tool call; on denied, drop the request and tell the user it was not approved. Past the expiry the request can never be approved: stop polling, stop asking the user, and open a new request only if the task still needs those tools.",
+      "inputSchema": {
+        "properties": {
+          "app": {
+            "description": "Name of the app the gated tools belong to. Use the exact name from the block message.",
+            "type": "string"
+          },
+          "consent_method": {
+            "description": "Optional. Leave out to use the user's usual way of approving. Otherwise a method spelled exactly as user_consent_methods reports it, which then becomes their usual one.",
+            "type": "string"
+          },
+          "tools": {
+            "description": "Names of the tools that require consent, all belonging to the same app. Use the exact names from the block message. Pass a one-element list when only a single tool is gated. At most 10 tools per request; if the task needs more, ask for the first 10 and open another request once those are approved.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "app",
+          "tools"
+        ],
+        "type": "object"
+      },
+      "annotations": {
+        "title": "Request user consent",
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "hush_search_tools",
+      "description": "Search every tool available across the user's connected apps. Your visible tool list is cached and can be incomplete or stale — it may not include an app that was just connected. When you can't find a tool for the request, call this with a natural-language query (e.g. \"create a jira issue\") to rank tools by relevance. Pass `app` to search a single app, named exactly as hush_list_apps reports it. It searches connected apps only, so an empty result can mean the app simply isn't connected yet or is unavailable: call hush_list_apps to check before concluding the gateway can't do something. A query that has no spaces and carries a regex metacharacter (e.g. \"jira|issue\", \"search.*log\") is matched as a regular expression instead. Both search tool names, descriptions, and parameters. Each result's name is the tool's complete identifier: pass it to hush_call_tool exactly as returned. Do not split it or read an app name out of it — app names come from hush_list_apps.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "A natural-language query, ranked against tool names, descriptions, and parameters. A query that has no spaces and carries a regex metacharacter (e.g. jira|issue or ^github_) is matched as a regular expression instead."
+          },
+          "app": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Optional: search only this app, named exactly as hush_list_apps reports it. Omit to search every connected app."
+          }
+        },
+        "required": [
+          "query"
+        ]
+      },
+      "annotations": {
+        "title": "Search tools",
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true
+      }
+    },
+    {
+      "name": "hush_user_consent_methods",
+      "description": "List the ways this user can be asked to approve a tool call their organization gated behind explicit consent, each with a name to show the user and a description. You rarely need this: request_user_consent reaches the user the way they usually approve, and says when they need to pick one. Use it when the user wants to change how they approve.",
+      "inputSchema": {
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "annotations": {
+        "title": "User consent methods",
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "hush_user_consent_status",
+      "description": "Report whether the user has granted consent for a previously requested tool call. Call this as request_user_consent's result says, passing the request id it returned. Returns granted, denied, pending, or that the request is no longer live. Pass wait=true to have the call wait up to 45 seconds for the user to decide before it answers; then call it again straight away while it reports pending.",
+      "inputSchema": {
+        "properties": {
+          "request_id": {
+            "description": "The request id returned by request_user_consent for the consent you are polling.",
+            "type": "string"
+          },
+          "wait": {
+            "description": "Wait up to 45 seconds for the user to decide before answering.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "request_id"
+        ],
+        "type": "object"
+      },
+      "annotations": {
+        "title": "User consent status",
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    }
+  ]
+}
