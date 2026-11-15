@@ -35,4 +35,4 @@ jobs:
       - name: Build
         run: |
           make build && ./hush version
-          for os in darwin windows; do GOOS=$os go build -o /dev/null .; done
+          for os in darwin windows; do GOOS=$os go build -o /dev/null ./cmd/hush; done

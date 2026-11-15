@@ -1,4 +1,5 @@
-package main
+// Package gateway serves a Hush gateway to local agents over stdio.
+package gateway
 
 import (
 	"bufio"
@@ -17,6 +18,11 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/hushsecurity/hush-cli/internal/config"
+	"github.com/hushsecurity/hush-cli/internal/httpx"
+	"github.com/hushsecurity/hush-cli/internal/oauth"
+	"github.com/hushsecurity/hush-cli/internal/version"
 )
 
 // mcpClient has no overall timeout: a tool call can wait on the user (consent).
@@ -34,16 +40,18 @@ var (
 //go:embed gateway_tools.json
 var gatewayTools json.RawMessage
 
-// GatewayAuth is the saved sign-in to one gateway.
-type GatewayAuth struct {
-	OAuthClient
+// Auth is the saved sign-in to one gateway.
+type Auth struct {
+	oauth.Registration
 	TokenEndpoint string `json:"token_endpoint"`
 	RefreshToken  string `json:"refresh_token,omitempty"`
 }
 
-func gatewayFile(gw string) string {
+const authDir = "gateways"
+
+func authFile(gw string) string {
 	u, _ := url.Parse(gw)
-	return "gateways/" + strings.NewReplacer(":", "_", "/", "_").Replace(u.Host+u.Path) + ".json"
+	return authDir + "/" + strings.NewReplacer(":", "_", "/", "_").Replace(u.Host+u.Path) + ".json"
 }
 
 // proxy relays MCP messages between stdio and a gateway's streamable HTTP endpoint.
@@ -74,7 +82,7 @@ type proxy struct {
 	streamOnce sync.Once
 }
 
-func gatewayProxy(gw string) error {
+func Proxy(gw string) error {
 	if err := checkGatewayURL(gw); err != nil {
 		return err
 	}
@@ -246,7 +254,7 @@ func (p *proxy) local(msg, id json.RawMessage, method string) {
 		result = map[string]any{
 			"protocolVersion": pv,
 			"capabilities":    map[string]any{"tools": listChanged, "prompts": listChanged, "resources": listChanged},
-			"serverInfo":      map[string]string{"name": "hush", "version": version},
+			"serverInfo":      map[string]string{"name": "hush", "version": version.Version},
 			"instructions": "This server is the user's Hush gateway, which serves their organization's apps. " +
 				"When the user asks for something from those apps, use its tools, starting with hush_list_apps. " +
 				"If they aren't signed in yet, that first call opens the browser to sign in.",
@@ -324,8 +332,8 @@ func (p *proxy) signIn() (instructions string, err error) {
 	}()
 	p.authMu.Lock()
 	tok, err := refreshGateway(p.url)
-	var bad *statusError
-	if errors.Is(err, errNotSignedIn) || errors.As(err, &bad) && bad.code < 500 {
+	var bad *httpx.StatusError
+	if errors.Is(err, errNotSignedIn) || errors.As(err, &bad) && bad.Code < 500 {
 		p.mu.Lock()
 		meta := p.meta
 		p.mu.Unlock()
@@ -558,7 +566,7 @@ func (p *proxy) headers(req *http.Request) {
 }
 
 func (p *proxy) setHeaders(req *http.Request, tok, session string, initialize bool) {
-	req.Header.Set("User-Agent", "hush-cli/"+version)
+	req.Header.Set("User-Agent", "hush-cli/"+version.Version)
 	if tok != "" {
 		req.Header.Set("Authorization", "Bearer "+tok)
 	}
@@ -578,7 +586,7 @@ func (p *proxy) setHeaders(req *http.Request, tok, session string, initialize bo
 // relay passes the gateway's reply (one JSON message, or an event stream) to sink.
 func (p *proxy) relay(resp *http.Response, initialize bool, sink func([]byte)) error {
 	defer func() { _ = resp.Body.Close() }()
-	if err := checkStatus(resp); err != nil {
+	if err := httpx.CheckStatus(resp); err != nil {
 		return err
 	}
 	if initialize {
@@ -686,14 +694,14 @@ func (p *proxy) authorize(used, meta string, refused bool) error {
 	}
 	if !refused {
 		tok, err := refreshGateway(p.url)
-		var bad *statusError
+		var bad *httpx.StatusError
 		switch {
 		case err == nil:
 			p.mu.Lock()
 			p.token = tok
 			p.mu.Unlock()
 			return nil
-		case errors.As(err, &bad) && bad.code < 500: // the refresh token is no good
+		case errors.As(err, &bad) && bad.Code < 500: // the refresh token is no good
 			logf("refresh failed: %v", err)
 		case !errors.Is(err, errNotSignedIn):
 			return err
@@ -705,18 +713,18 @@ func (p *proxy) authorize(used, meta string, refused bool) error {
 
 // refreshGateway trades the saved refresh token, under the lock other hush runs share.
 func refreshGateway(gw string) (string, error) {
-	if err := lockSession(); err != nil {
+	if err := config.Lock(); err != nil {
 		return "", err
 	}
-	defer releaseLock()
-	var a GatewayAuth
-	if err := load(gatewayFile(gw), &a); err != nil {
+	defer config.ReleaseLock()
+	var a Auth
+	if err := config.Load(authFile(gw), &a); err != nil {
 		return "", err
 	}
 	if a.RefreshToken == "" {
 		return "", errNotSignedIn
 	}
-	tok, err := tokenAt(a.TokenEndpoint, url.Values{
+	tok, err := oauth.RequestToken(a.TokenEndpoint, url.Values{
 		"grant_type":    {"refresh_token"},
 		"refresh_token": {a.RefreshToken},
 		"client_id":     {a.ClientID},
@@ -726,7 +734,7 @@ func refreshGateway(gw string) (string, error) {
 	}
 	if tok.RefreshToken != "" {
 		a.RefreshToken = tok.RefreshToken
-		if err := save(gatewayFile(gw), a); err != nil {
+		if err := config.Save(authFile(gw), a); err != nil {
 			return "", err
 		}
 	}
@@ -746,7 +754,7 @@ func signInGateway(gw, meta string) (string, error) {
 		Resource             string   `json:"resource"`
 		AuthorizationServers []string `json:"authorization_servers"`
 	}
-	if err := getJSON(meta, &prm); err != nil {
+	if err := httpx.GetJSON(meta, &prm); err != nil {
 		return "", err
 	}
 	if prm.Resource == "" {
@@ -768,7 +776,7 @@ func signInGateway(gw, meta string) (string, error) {
 	}
 	issuer, _ := url.Parse(prm.AuthorizationServers[0])
 	asMeta := issuer.Scheme + "://" + issuer.Host + "/.well-known/oauth-authorization-server" + strings.TrimRight(issuer.Path, "/")
-	if err := getJSON(asMeta, &as); err != nil {
+	if err := httpx.GetJSON(asMeta, &as); err != nil {
 		return "", err
 	}
 	for _, e := range []string{as.AuthorizationEndpoint, as.TokenEndpoint, as.RegistrationEndpoint} {
@@ -777,15 +785,15 @@ func signInGateway(gw, meta string) (string, error) {
 		}
 	}
 
-	var a GatewayAuth
-	if err := load(gatewayFile(gw), &a); err != nil {
+	var a Auth
+	if err := config.Load(authFile(gw), &a); err != nil {
 		return "", err
 	}
 	if a.TokenEndpoint != as.TokenEndpoint {
-		a = GatewayAuth{TokenEndpoint: as.TokenEndpoint}
+		a = Auth{TokenEndpoint: as.TokenEndpoint}
 	}
-	defer releaseLock()
-	tok, err := browserSignIn(&a.OAuthClient, as.AuthorizationEndpoint, as.TokenEndpoint, as.RegistrationEndpoint,
+	defer config.ReleaseLock()
+	tok, err := oauth.SignIn(&a.Registration, as.AuthorizationEndpoint, as.TokenEndpoint, as.RegistrationEndpoint,
 		url.Values{"resource": {prm.Resource}}, func(authURL string) {
 			logf("opening your browser to sign in to the gateway; if it doesn't open, visit:\n  %s", authURL)
 		})
@@ -793,7 +801,7 @@ func signInGateway(gw, meta string) (string, error) {
 		return "", err
 	}
 	a.RefreshToken = tok.RefreshToken
-	return tok.AccessToken, save(gatewayFile(gw), a)
+	return tok.AccessToken, config.Save(authFile(gw), a)
 }
 
 // checkHTTPS refuses a URL from the gateway's metadata unless it's https,
@@ -815,15 +823,18 @@ func resourceMetadata(header string) string {
 	return ""
 }
 
-func getJSON(u string, v any) error {
-	resp, err := httpClient.Get(u)
-	if err != nil {
-		return err
-	}
-	return decode(resp, v)
-}
-
 // logf writes to stderr; stdout carries the protocol.
 func logf(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "hush: "+format+"\n", args...)
+}
+
+func ForgetAll() error {
+	if err := config.Lock(); err != nil {
+		return err
+	}
+	path, err := config.Path(authDir)
+	if err != nil {
+		return err
+	}
+	return os.RemoveAll(path)
 }

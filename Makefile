@@ -1,4 +1,5 @@
 VERSION := $(shell git describe --always --dirty --tags)
+LDFLAGS := -X github.com/hushsecurity/hush-cli/internal/version.Version=$(VERSION)
 LINT := go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0
 
 .PHONY: all
@@ -15,7 +16,7 @@ test:
 
 .PHONY: build
 build:
-	@go build -ldflags "-X main.version=$(VERSION)" -o hush .
+	@go build -ldflags "$(LDFLAGS)" -o hush ./cmd/hush
 
 .PHONY: clean
 clean:

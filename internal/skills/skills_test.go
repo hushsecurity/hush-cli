@@ -1,4 +1,4 @@
-package main
+package skills
 
 import (
 	"crypto/sha256"
@@ -12,6 +12,10 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/hushsecurity/hush-cli/internal/auth"
+	"github.com/hushsecurity/hush-cli/internal/config"
+	"github.com/hushsecurity/hush-cli/internal/oauth"
 )
 
 // fakeAPI serves the token endpoint and the user's skills.
@@ -20,7 +24,7 @@ func fakeAPI(t *testing.T, skills *[]Skill, files map[string]string) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v1/agents/oauth/token":
-			_ = json.NewEncoder(w).Encode(token{AccessToken: "at", RefreshToken: "rt2"})
+			_ = json.NewEncoder(w).Encode(oauth.Token{AccessToken: "at", RefreshToken: "rt2"})
 		case "/v1/skills/me":
 			_ = json.NewEncoder(w).Encode(*skills)
 		default:
@@ -36,7 +40,7 @@ func fakeAPI(t *testing.T, skills *[]Skill, files map[string]string) {
 	for _, env := range []string{"HOME", "USERPROFILE", "XDG_CONFIG_HOME", "AppData"} {
 		t.Setenv(env, home)
 	}
-	if err := save(sessionFile, Session{API: srv.URL, RefreshToken: "rt"}); err != nil {
+	if err := config.Save(auth.SessionFile, auth.Session{API: srv.URL, RefreshToken: "rt"}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -46,7 +50,7 @@ func skill(name string, version int, files map[string]string, body string) Skill
 	digest := hex.EncodeToString(sum[:])
 	files[digest] = body
 	s := Skill{ID: "skl-" + name, Name: name, Version: version}
-	s.Files = []SkillFile{{"SKILL.md", digest, len(body)}}
+	s.Files = []File{{"SKILL.md", digest, len(body)}}
 	return s
 }
 
@@ -70,7 +74,7 @@ func TestSync(t *testing.T) {
 	_ = os.MkdirAll(filepath.Dir(other), 0o755)
 	_ = os.WriteFile(other, []byte("not hush's"), 0o644)
 
-	if err := syncSkills(""); err != nil {
+	if err := Sync(""); err != nil {
 		t.Fatal(err)
 	}
 	for _, dir := range []string{shared, claude} {
@@ -81,7 +85,7 @@ func TestSync(t *testing.T) {
 
 	// A deleted skill comes back.
 	_ = os.RemoveAll(filepath.Join(shared, "one"))
-	if err := syncSkills(""); err != nil {
+	if err := Sync(""); err != nil {
 		t.Fatal(err)
 	}
 	if got := read(t, filepath.Join(claude, "one", "SKILL.md")); got != "v1" {
@@ -90,7 +94,7 @@ func TestSync(t *testing.T) {
 
 	// A new version replaces it; a folder hush didn't install is left alone.
 	skills = []Skill{skill("one", 2, files, "v2"), skill("mine", 1, files, "hush's")}
-	if err := syncSkills(""); err == nil {
+	if err := Sync(""); err == nil {
 		t.Fatal("linked over a skill hush didn't install")
 	}
 	if got := read(t, filepath.Join(claude, "one", "SKILL.md")); got != "v2" {
@@ -102,7 +106,7 @@ func TestSync(t *testing.T) {
 
 	// Unassigned skills are removed.
 	skills = nil
-	if err := syncSkills(""); err != nil {
+	if err := Sync(""); err != nil {
 		t.Fatal(err)
 	}
 	for _, dir := range []string{shared, claude} {
@@ -126,7 +130,7 @@ func TestSyncRefusesBadFiles(t *testing.T) {
 	for _, s := range []Skill{bad, escape} {
 		skills := []Skill{s}
 		fakeAPI(t, &skills, files)
-		if err := syncSkills(""); err == nil {
+		if err := Sync(""); err == nil {
 			t.Fatalf("installed %s", s.Name)
 		}
 	}
@@ -139,19 +143,19 @@ func TestRemoveAndAdd(t *testing.T) {
 	home, _ := os.UserHomeDir()
 	installed := filepath.Join(home, ".agents", "skills", "one", "SKILL.md")
 
-	if err := syncSkills(""); err != nil {
+	if err := Sync(""); err != nil {
 		t.Fatal(err)
 	}
-	if err := removeSkill("one"); err != nil {
+	if err := Remove("one"); err != nil {
 		t.Fatal(err)
 	}
-	if err := syncSkills(""); err != nil {
+	if err := Sync(""); err != nil {
 		t.Fatal(err)
 	}
 	if read(t, installed) != "" {
 		t.Fatal("sync reinstalled a removed skill")
 	}
-	if err := syncSkills("one"); err != nil { // hush skills add one
+	if err := Sync("one"); err != nil { // hush skills add one
 		t.Fatal(err)
 	}
 	if got := read(t, installed); got != "v1" {
@@ -168,20 +172,20 @@ func TestAutosync(t *testing.T) {
 	other := `{"model": "opus", "hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": "echo hi"}]}]}}`
 	_ = os.WriteFile(path, []byte(other), 0o600)
 
-	if err := autosync("on"); err != nil {
+	if err := Autosync("on"); err != nil {
 		t.Fatal(err)
 	}
 	if fi, _ := os.Stat(path); runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600 {
 		t.Fatalf("mode %v", fi.Mode().Perm())
 	}
-	if err := autosync("on"); err != nil { // no duplicate
+	if err := Autosync("on"); err != nil { // no duplicate
 		t.Fatal(err)
 	}
 	got := read(t, path)
 	if strings.Count(got, syncArgs) != 1 || !strings.Contains(got, "echo hi") || !strings.Contains(got, "opus") {
 		t.Fatalf("on: %s", got)
 	}
-	if err := autosync("off"); err != nil {
+	if err := Autosync("off"); err != nil {
 		t.Fatal(err)
 	}
 	got = read(t, path)

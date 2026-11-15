@@ -1,4 +1,5 @@
-package main
+// Package oauth signs in in the browser with PKCE.
+package oauth
 
 import (
 	"context"
@@ -12,80 +13,35 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"runtime"
-	"strings"
 	"time"
+
+	"github.com/hushsecurity/hush-cli/internal/config"
+	"github.com/hushsecurity/hush-cli/internal/httpx"
+	"github.com/hushsecurity/hush-cli/internal/version"
 )
 
-const (
-	defaultAPI   = "https://api.us.hush-security.com"
-	sessionFile  = "session.json"
-	loginTimeout = 5 * time.Minute
-)
+const signInTimeout = 5 * time.Minute
 
-func login(api, org string) error {
-	if api == "" {
-		api = os.Getenv("HUSH_API_URL")
-	}
-	if api == "" {
-		api = defaultAPI
-	}
-	api = strings.TrimRight(api, "/")
-
-	var s Session
-	if err := load(sessionFile, &s); err != nil {
-		return err
-	}
-	if s.API != api {
-		s = Session{API: api}
-	}
-
-	params := url.Values{"resource": {api + "/v1/me"}}
-	if org != "" {
-		params.Set("org_shortname", org)
-	}
-	o := api + "/v1/agents/oauth"
-	tok, err := browserSignIn(&s.OAuthClient, o+"/authorize", o+"/token", o+"/register", params, func(authURL string) {
-		fmt.Printf("Opening your browser to sign in. If it doesn't open, visit:\n\n  %s\n\nWaiting for you to sign in…\n", authURL)
-	})
-	if err != nil {
-		return err
-	}
-	s.RefreshToken, s.Org = tok.RefreshToken, org
-	if err := save(sessionFile, s); err != nil {
-		return err
-	}
-	claims := (&Client{accessToken: tok.AccessToken}).claims()
-	orgName := org
-	if orgName == "" {
-		orgName = fmt.Sprint(claims["oid"])
-	}
-	fmt.Printf("Signed in as %s to %s.\n", userName(claims), orgName)
-	if m, err := loadManifest(); err == nil && len(m.Installed) == 0 {
-		fmt.Println(`Run "hush skills sync" to install your skills.`)
-	}
-	return nil
+// Registration is a registered public client and its loopback redirect.
+type Registration struct {
+	ClientID    string `json:"client_id"`
+	RedirectURI string `json:"redirect_uri"`
 }
 
-func logout() error {
-	if err := lockSession(); err != nil {
-		return err
-	}
-	path, err := configPath(sessionFile)
+type Token struct {
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+}
+
+func RequestToken(endpoint string, form url.Values) (*Token, error) {
+	resp, err := httpx.Client.PostForm(endpoint, form)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	if err := os.RemoveAll(filepath.Join(filepath.Dir(path), "gateways")); err != nil {
-		return err
-	}
-	fmt.Println("Signed out.")
-	return nil
+	var tok Token
+	return &tok, httpx.Decode(resp, &tok)
 }
 
 // listen binds the loopback port of the saved redirect URI, else any free one.
@@ -98,23 +54,23 @@ func listen(redirectURI string) (net.Listener, error) {
 	return net.Listen("tcp", "127.0.0.1:0")
 }
 
-func registerClient(endpoint, redirectURI string) (string, error) {
+func register(endpoint, redirectURI string) (string, error) {
 	var out struct {
 		ClientID string `json:"client_id"`
 	}
-	err := postJSON(endpoint, map[string]any{
+	err := httpx.PostJSON(endpoint, map[string]any{
 		"client_name":                "Hush CLI",
 		"software_id":                "hush-cli",
-		"software_version":           version,
+		"software_version":           version.Version,
 		"redirect_uris":              []string{redirectURI},
 		"token_endpoint_auth_method": "none",
 	}, &out)
 	return out.ClientID, err
 }
 
-// browserSignIn runs a PKCE sign-in in the browser. It reuses c's redirect
+// SignIn runs a PKCE sign-in in the browser. It reuses c's redirect
 // port when free, so one client serves every sign-in, else registers anew.
-func browserSignIn(c *OAuthClient, authorizeURL, tokenURL, registerURL string, params url.Values, tell func(authURL string)) (*token, error) {
+func SignIn(c *Registration, authorizeURL, tokenURL, registerURL string, params url.Values, tell func(authURL string)) (*Token, error) {
 	ln, err := listen(c.RedirectURI)
 	if err != nil {
 		return nil, err
@@ -122,7 +78,7 @@ func browserSignIn(c *OAuthClient, authorizeURL, tokenURL, registerURL string, p
 	defer func() { _ = ln.Close() }()
 	redirectURI := fmt.Sprintf("http://%s/callback", ln.Addr())
 	if c.ClientID == "" || c.RedirectURI != redirectURI {
-		if c.ClientID, err = registerClient(registerURL, redirectURI); err != nil {
+		if c.ClientID, err = register(registerURL, redirectURI); err != nil {
 			return nil, err
 		}
 		c.RedirectURI = redirectURI
@@ -146,17 +102,17 @@ func browserSignIn(c *OAuthClient, authorizeURL, tokenURL, registerURL string, p
 	maps.Copy(q, authURL.Query())
 	authURL.RawQuery = q.Encode()
 	tell(authURL.String())
-	_ = openBrowser(authURL.String())
+	_ = OpenBrowser(authURL.String())
 
 	code, err := waitForCode(ln, state)
 	if err != nil {
 		return nil, err
 	}
 	// Locked only now, not across the browser wait.
-	if err := lockSession(); err != nil {
+	if err := config.Lock(); err != nil {
 		return nil, err
 	}
-	return tokenAt(tokenURL, url.Values{
+	return RequestToken(tokenURL, url.Values{
 		"grant_type":    {"authorization_code"},
 		"code":          {code},
 		"redirect_uri":  {redirectURI},
@@ -206,7 +162,7 @@ func waitForCode(ln net.Listener, state string) (string, error) {
 	select {
 	case res := <-done:
 		return res.code, res.err
-	case <-time.After(loginTimeout):
+	case <-time.After(signInTimeout):
 		return "", errors.New("timed out waiting for the browser sign-in")
 	}
 }
@@ -228,7 +184,7 @@ func random() string {
 	return base64.RawURLEncoding.EncodeToString(b)
 }
 
-var openBrowser = func(u string) error { // a variable so tests can sign in without one
+var OpenBrowser = func(u string) error { // a variable so tests can sign in without one
 	switch runtime.GOOS {
 	case "darwin":
 		return exec.Command("open", u).Start()

@@ -1,27 +1,28 @@
-package main
+package skills
 
 import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
+
+	"github.com/hushsecurity/hush-cli/internal/config"
 )
 
 const syncArgs = "skills sync --quiet"
 
-// autosync turns on or off a Claude Code hook that syncs skills whenever a
+// Autosync turns on or off a Claude Code hook that syncs skills whenever a
 // session starts, or with no argument says whether it's on.
-func autosync(arg string) error {
+func Autosync(arg string) error {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return err
 	}
 	path := filepath.Join(home, ".claude", "settings.json")
-	changed, err := editJSON(path, func(settings map[string]any) (bool, error) {
+	changed, err := config.EditJSON(path, func(settings map[string]any) (bool, error) {
 		hooks, _ := settings["hooks"].(map[string]any)
 		if hooks == nil {
 			hooks = map[string]any{}
@@ -78,32 +79,11 @@ func isSyncHook(entry any) bool {
 	})
 }
 
-// hushExe is this binary's full path, preferring its PATH entry (e.g.
-// Homebrew's link), which survives upgrades.
-func hushExe() string {
-	exe, err := os.Executable()
-	if err != nil {
-		return "hush"
-	}
-	if p, err := exec.LookPath("hush"); err == nil {
-		if abs, err := filepath.Abs(p); err == nil && sameFile(abs, exe) {
-			exe = abs
-		}
-	}
-	return exe
-}
-
-// hushPath is hushExe for a hook command.
+// hushPath is the executable's path for a hook command.
 func hushPath() string {
-	exe := filepath.ToSlash(hushExe()) // Claude Code runs Windows hooks in Git Bash
+	exe := filepath.ToSlash(config.Executable()) // Claude Code runs Windows hooks in Git Bash
 	if strings.ContainsAny(exe, ` '`) {
 		return strconv.Quote(exe)
 	}
 	return exe
-}
-
-func sameFile(a, b string) bool {
-	fa, errA := os.Stat(a)
-	fb, errB := os.Stat(b)
-	return errA == nil && errB == nil && os.SameFile(fa, fb)
 }
