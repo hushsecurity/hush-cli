@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -27,18 +28,20 @@ import (
 type fakeGateway struct {
 	url string
 
-	mu        sync.Mutex
-	signIns   int
-	tokens    int    // tokens issued
-	at, rt    string // the valid access token, and the one refresh token that works
-	sessions  int
-	session   string               // the live one
-	expire    bool                 // drop the session after the next tools/list
-	stream    []string             // messages to send on the GET stream, once
-	cut       bool                 // end tools/list streams before the reply
-	resource  string               // metadata's resource, if not the gateway's
-	authorize string               // metadata's authorization endpoint, if not ours
-	answers   chan json.RawMessage // the client's answers to our requests
+	mu            sync.Mutex
+	signIns       int
+	tokens        int    // tokens issued
+	at, rt        string // the valid access token, and the one refresh token that works
+	sessions      int
+	session       string               // the live one
+	expire        bool                 // drop the session after the next tools/list
+	stream        []string             // messages to send on the GET stream, once
+	cut           bool                 // end tools/list streams before the reply
+	resource      string               // metadata's resource, if not the gateway's
+	authorize     string               // metadata's authorization endpoint, if not ours
+	answers       chan json.RawMessage // the client's answers to our requests
+	refuseModern  int                  // status for 2026-07-28 requests, like an older gateway; 0 takes them
+	discoverFails int                  // 503s before server/discover answers
 }
 
 func newFakeGateway(t *testing.T) *fakeGateway {
@@ -151,7 +154,15 @@ func (g *fakeGateway) serveMCP(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = json.Unmarshal(msg.Params, &tool)
 	if v := r.Header.Get("Mcp-Protocol-Version"); v >= "2026-07-28" {
-		serveModern(w, r, v, msg.ID, msg.Method, msg.Params)
+		switch {
+		case g.refuseModern != 0:
+			http.Error(w, "unsupported protocol version", g.refuseModern)
+		case msg.Method == "server/discover" && g.discoverFails > 0:
+			g.discoverFails--
+			http.Error(w, "busy", http.StatusServiceUnavailable)
+		default:
+			g.serveModern(w, r, v, msg.ID, msg.Method, msg.Params)
+		}
 		return
 	}
 	if msg.Method == "initialize" {
@@ -203,10 +214,20 @@ func (g *fakeGateway) serveMCP(w http.ResponseWriter, r *http.Request) {
 
 // serveModern checks a 2026-07-28 request like the real gateway: no session,
 // and headers that repeat the body's version, method and name. It echoes the params.
-func serveModern(w http.ResponseWriter, r *http.Request, version string, id json.RawMessage, method string, params json.RawMessage) {
+func (g *fakeGateway) serveModern(w http.ResponseWriter, r *http.Request, version string, id json.RawMessage, method string, params json.RawMessage) {
 	var p struct {
-		Name, URI string
-		Meta      map[string]any `json:"_meta"`
+		Name, URI      string
+		Meta           map[string]any  `json:"_meta"`
+		InputResponses json.RawMessage `json:"inputResponses"`
+		RequestState   string          `json:"requestState"`
+		Arguments      struct {
+			Rounds  int      // questions asked before answering, 1 if unset
+			Ask     []string // the questions in each round, "ok" if unset
+			Slow    bool     // asks after a while
+			Cut     bool     // ends the stream with an error after asking
+			NoState bool     // asks without a requestState
+			Later   bool     // asks again, without a requestState, after the first answer
+		}
 	}
 	_ = json.Unmarshal(params, &p)
 	name := r.Header.Get("Mcp-Name")
@@ -225,6 +246,52 @@ func serveModern(w http.ResponseWriter, r *http.Request, version string, id json
 		http.Error(w, "Mcp-Method mismatch", http.StatusBadRequest)
 	case name != p.Name+p.URI:
 		http.Error(w, "Mcp-Name mismatch", http.StatusBadRequest)
+	case method == "server/discover":
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%s,"result":{"supportedVersions":["2025-11-25","2026-07-28"]}}`, id)
+	case p.Name == "hush_request_user_consent": // asks in the result, as the gateway prompts
+		if p.Meta["io.modelcontextprotocol/clientCapabilities"] == nil {
+			http.Error(w, "no client capabilities", http.StatusBadRequest)
+			return
+		}
+		round, _ := strconv.Atoi(strings.TrimPrefix(p.RequestState, "st"))
+		if p.Arguments.NoState && p.InputResponses != nil {
+			round = 1
+		}
+		if p.Arguments.Later && p.RequestState == "st1" {
+			p.Arguments.NoState, round = true, 0
+		} else if p.Arguments.Later && p.InputResponses != nil {
+			round = 1
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if round >= max(p.Arguments.Rounds, 1) {
+			fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%s,"result":{"resultType":"complete","content":[{"type":"text","text":%q}]}}`, id, p.RequestState+" "+string(p.InputResponses))
+			return
+		}
+		if p.Arguments.Slow {
+			g.mu.Unlock()
+			time.Sleep(200 * time.Millisecond)
+			g.mu.Lock()
+		}
+		requests := map[string]any{}
+		if p.Arguments.Ask == nil {
+			p.Arguments.Ask = []string{"ok"}
+		}
+		for _, key := range p.Arguments.Ask {
+			requests[key] = map[string]any{"method": "elicitation/create", "params": map[string]string{"message": key + "?"}}
+		}
+		result := map[string]any{"resultType": "input_required", "inputRequests": requests, "requestState": fmt.Sprintf("st%d", round+1)}
+		if p.Arguments.NoState {
+			delete(result, "requestState")
+		}
+		out, _ := json.Marshal(result)
+		if p.Arguments.Cut {
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprintf(w, "data: {\"jsonrpc\":\"2.0\",\"id\":%s,\"result\":%s}\n\n", id, out)
+			w.(http.Flusher).Flush()
+			panic(http.ErrAbortHandler)
+		}
+		fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%s,"result":%s}`, id, out)
 	default:
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%s,"result":{"echo":%s}}`, id, params)
@@ -239,7 +306,7 @@ func (g *fakeGateway) callTool(w http.ResponseWriter, id json.RawMessage, name s
 		w.(http.Flusher).Flush()
 	}
 	switch name {
-	case "consent":
+	case "consent", "hush_request_user_consent":
 		w.Header().Set("Content-Type", "text/event-stream")
 		event(`{"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":1,"progress":1}}`)
 		event(`{"jsonrpc":"2.0","id":%s,"method":"elicitation/create","params":{"message":"Allow?"}}`, id)
@@ -503,6 +570,197 @@ func TestGatewayProxyElicitation(t *testing.T) {
 	a.send(`{"jsonrpc":"2.0","id":7,"result":{"action":"accept"}}`)
 	if got := a.next(); got != `{"jsonrpc":"2.0","id":7,"result":{"content":[{"type":"text","text":"{\"action\":\"accept\"}"}]}}` {
 		t.Fatalf("want the call's result, got %s", got)
+	}
+}
+
+// oldAgent is a client before 2026-07-28 that can prompt.
+func oldAgent(t *testing.T, gw string) *agent {
+	a := launchAgent(t, gw)
+	a.send(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{"elicitation":{}},"clientInfo":{"name":"old"}}}`)
+	a.next()
+	a.send(`{"jsonrpc":"2.0","method":"notifications/initialized"}`)
+	return a
+}
+
+const consentCall = `{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"hush_request_user_consent","arguments":%s}}`
+
+// The gateway's questions about an approval reach an older client as requests of its own.
+func TestGatewayProxyBridgesInputRequests(t *testing.T) {
+	g := newFakeGateway(t)
+	a := oldAgent(t, g.url)
+	defer a.stop()
+	a.send(fmt.Sprintf(consentCall, `{}`))
+	if got := a.next(); got != `{"jsonrpc":"2.0","id":"hush-input-1","method":"elicitation/create","params":{"message":"ok?"}}` {
+		t.Fatalf("want the gateway's question, got %s", got)
+	}
+	a.send(`{"jsonrpc":"2.0","id":"hush-input-1","result":{"action":"accept"}}`)
+	if got := a.next(); got != `{"jsonrpc":"2.0","id":7,"result":{"resultType":"complete","content":[{"type":"text","text":"st1 {\"ok\":{\"action\":\"accept\"}}"}]}}` {
+		t.Fatalf("want the call's result, got %s", got)
+	}
+	// Other calls, apps' included, stay in the client's version and session.
+	if got := a.call(8, "tools/list", `{}`); got != `{"jsonrpc":"2.0","id":8,"result":{"tools":[]}}` {
+		t.Fatalf("got %s", got)
+	}
+	if got := a.call(9, "tools/call", `{"name":"iserror"}`); !strings.HasPrefix(got, `{"jsonrpc":"2.0","id":9,"result":{"isError":true`) {
+		t.Fatalf("want the app's own reply, got %s", got)
+	}
+}
+
+func TestUpgrade(t *testing.T) {
+	c := clientInit{Capabilities: map[string]json.RawMessage{"elicitation": json.RawMessage(`{}`)}}
+	for _, meta := range []string{`null`, `{"progressToken":9007199254740993}`} {
+		got := string(upgrade([]byte(`{"jsonrpc":"2.0","id":1,"params":{"name":"x","_meta":`+meta+`}}`), c))
+		if !strings.Contains(got, `"io.modelcontextprotocol/protocolVersion":"2026-07-28"`) ||
+			meta != "null" && !strings.Contains(got, `"progressToken":9007199254740993`) {
+			t.Errorf("%s: got %s", meta, got)
+		}
+	}
+}
+
+// A question without a requestState is answered without one.
+func TestGatewayProxyBridgesWithoutState(t *testing.T) {
+	g := newFakeGateway(t)
+	a := oldAgent(t, g.url)
+	defer a.stop()
+	a.send(fmt.Sprintf(consentCall, `{"noState":true}`))
+	a.next()
+	a.send(`{"jsonrpc":"2.0","id":"hush-input-1","result":{"action":"decline"}}`)
+	if got := a.next(); !strings.Contains(got, `" {\"ok\":{\"action\":\"decline\"}}"`) {
+		t.Fatalf("got %s", got)
+	}
+}
+
+// A later question without a requestState isn't answered with the earlier round's.
+func TestGatewayProxyBridgesLaterWithoutState(t *testing.T) {
+	g := newFakeGateway(t)
+	a := oldAgent(t, g.url)
+	defer a.stop()
+	a.send(fmt.Sprintf(consentCall, `{"later":true}`))
+	for i := range 2 {
+		a.next()
+		a.send(fmt.Sprintf(`{"jsonrpc":"2.0","id":"hush-input-%d","result":{"action":"accept"}}`, i+1))
+	}
+	if got := a.next(); !strings.Contains(got, `"text":" {\"ok\":{\"action\":\"accept\"}}"`) {
+		t.Fatalf("got %s", got)
+	}
+}
+
+// Several questions at once, over several rounds, each get answered.
+func TestGatewayProxyBridgesRounds(t *testing.T) {
+	g := newFakeGateway(t)
+	a := oldAgent(t, g.url)
+	defer a.stop()
+	a.send(fmt.Sprintf(consentCall, `{"rounds":2,"ask":["a","b"]}`))
+	for range 4 {
+		var q struct{ ID json.RawMessage }
+		_ = json.Unmarshal([]byte(a.next()), &q)
+		a.send(`{"jsonrpc":"2.0","id":` + string(q.ID) + `,"result":{"action":"accept"}}`)
+	}
+	if got := a.next(); !strings.Contains(got, `st2 {\"a\":{\"action\":\"accept\"},\"b\":{\"action\":\"accept\"}}`) {
+		t.Fatalf("want both answers of the last round, got %s", got)
+	}
+}
+
+func TestGatewayProxyBridgeFailures(t *testing.T) {
+	g := newFakeGateway(t)
+	a := oldAgent(t, g.url)
+	defer a.stop()
+
+	// The client can't answer.
+	a.send(fmt.Sprintf(consentCall, `{}`))
+	a.next()
+	a.send(`{"jsonrpc":"2.0","id":"hush-input-1","error":{"code":-32601,"message":"no"}}`)
+	if got := a.next(); got != `{"jsonrpc":"2.0","id":7,"error":{"code":-32603,"message":"the client couldn't answer elicitation/create: no"}}` {
+		t.Fatalf("got %s", got)
+	}
+
+	// The gateway never stops asking.
+	a.send(fmt.Sprintf(consentCall, `{"rounds":99}`))
+	for i := range 10 {
+		a.next()
+		a.send(fmt.Sprintf(`{"jsonrpc":"2.0","id":"hush-input-%d","result":{"action":"accept"}}`, i+2))
+	}
+	if got := a.next(); got != `{"jsonrpc":"2.0","id":7,"error":{"code":-32603,"message":"the gateway kept asking for more input"}}` {
+		t.Fatalf("got %s", got)
+	}
+
+	// A cancelled call gets no reply, and its late answer goes nowhere.
+	a.send(fmt.Sprintf(consentCall, `{}`))
+	a.next()
+	a.send(`{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":7}}`)
+	if got := a.next(); got != `{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"hush-input-12"}}` {
+		t.Fatalf("want the open question closed, got %s", got)
+	}
+	a.send(`{"jsonrpc":"2.0","id":"hush-input-12","result":{"action":"accept"}}`)
+	if got := a.call(8, "tools/list", `{}`); got != `{"jsonrpc":"2.0","id":8,"result":{"tools":[]}}` {
+		t.Fatalf("want only the next reply, got %s", got)
+	}
+
+	// Cancelled while the gateway works on it: no question, no reply.
+	a.send(fmt.Sprintf(consentCall, `{"slow":true}`))
+	a.send(`{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":7}}`)
+	time.Sleep(400 * time.Millisecond)
+	if got := a.call(8, "tools/list", `{}`); got != `{"jsonrpc":"2.0","id":8,"result":{"tools":[]}}` {
+		t.Fatalf("want only the next reply, got %s", got)
+	}
+
+	// The stream breaks after the gateway asked: the question still goes out.
+	a.send(fmt.Sprintf(consentCall, `{"cut":true}`))
+	if got := a.next(); got != `{"jsonrpc":"2.0","id":"hush-input-13","method":"elicitation/create","params":{"message":"ok?"}}` {
+		t.Fatalf("got %s", got)
+	}
+	a.send(`{"jsonrpc":"2.0","id":"hush-input-13","result":{"action":"accept"}}`)
+	if got := a.next(); !strings.Contains(got, `st1 {\"ok\":{\"action\":\"accept\"}}`) {
+		t.Fatalf("got %s", got)
+	}
+
+	// The client leaves with a question open: stop still sees the proxy end.
+	a.send(fmt.Sprintf(consentCall, `{}`))
+	a.next()
+}
+
+// Clients that can't prompt, and gateways before 2026-07-28, keep the client's version.
+func TestGatewayProxyBridgesOnlyWhenBothCan(t *testing.T) {
+	g := newFakeGateway(t)
+	a := startAgent(t, g.url) // can't prompt
+	a.send(`{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"hush_request_user_consent"}}`)
+	a.next() // progress
+	if got := a.next(); got != `{"jsonrpc":"2.0","id":7,"method":"elicitation/create","params":{"message":"Allow?"}}` {
+		t.Fatalf("want the gateway's own question, got %s", got)
+	}
+	a.send(`{"jsonrpc":"2.0","id":7,"result":{"action":"accept"}}`)
+	a.next()
+	a.stop()
+
+	g = newFakeGateway(t)
+	g.refuseModern = http.StatusNotFound
+	a = oldAgent(t, g.url)
+	defer a.stop()
+	a.send(`{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"hush_request_user_consent"}}`)
+	a.next() // progress
+	if got := a.next(); got != `{"jsonrpc":"2.0","id":7,"method":"elicitation/create","params":{"message":"Allow?"}}` {
+		t.Fatalf("want the gateway's own question, got %s", got)
+	}
+	a.send(`{"jsonrpc":"2.0","id":7,"result":{"action":"accept"}}`)
+	a.next()
+	if g.sessions != 1 { // the 404 to discover isn't the client's session expiring
+		t.Fatalf("%d sessions", g.sessions)
+	}
+}
+
+// A gateway that fails to say which versions it takes is asked again.
+func TestGatewayProxyRediscovers(t *testing.T) {
+	g := newFakeGateway(t)
+	g.discoverFails = 1
+	a := oldAgent(t, g.url)
+	defer a.stop()
+	a.send(`{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"hush_user_consent_methods"}}`)
+	if got := a.next(); strings.Contains(got, "2026-07-28") {
+		t.Fatalf("want the call in the client's version while the gateway's are unknown, got %s", got)
+	}
+	got := a.call(8, "tools/call", `{"name":"hush_user_consent_methods"}`)
+	if !strings.Contains(got, `"io.modelcontextprotocol/protocolVersion":"2026-07-28"`) {
+		t.Fatalf("want the call in the newer version, got %s", got)
 	}
 }
 
@@ -847,6 +1105,9 @@ func TestGatewayProxyModernProtocol(t *testing.T) {
 	} {
 		method := []string{"server/discover", "tools/call", "tools/call", "resources/read"}[i]
 		want := fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"result":{"echo":%s}}`, 60+i, params)
+		if i == 0 {
+			want = `{"jsonrpc":"2.0","id":60,"result":{"supportedVersions":["2025-11-25","2026-07-28"]}}`
+		}
 		if got := a.call(60+i, method, params); got != want {
 			t.Errorf("%s:\n got %s\nwant %s", method, got, want)
 		}

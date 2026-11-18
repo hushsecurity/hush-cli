@@ -69,7 +69,12 @@ type proxy struct {
 	meta      string // the gateway's resource metadata URL, for signing in
 	signIns   int    // sign-ins tried, and the last one's error, for calls that waited on it
 	signInErr error
-	cancelled map[string]bool // ids of calls the client cancelled
+	asked     map[string]chan json.RawMessage // the proxy's own requests to the client, by id
+	asks      int
+	pending   map[string]chan struct{} // requests in progress by id, closed if the client cancels
+	eof       chan struct{}            // the client stopped sending
+	client    clientInit               // from the client's initialize
+	modernGW  *bool                    // whether the gateway takes 2026-07-28; nil until it answers
 
 	authMu   sync.Mutex // one token renewal at a time
 	signInMu sync.Mutex // one sign-in at a time
@@ -98,7 +103,8 @@ func checkGatewayURL(gw string) error {
 
 func runProxy(gw string, in io.Reader, out io.Writer) error {
 	ctx, cancel := context.WithCancel(context.Background())
-	p := &proxy{url: gw, out: out, ctx: ctx, cancelled: map[string]bool{}}
+	p := &proxy{url: gw, out: out, ctx: ctx, asked: map[string]chan json.RawMessage{},
+		pending: map[string]chan struct{}{}, eof: make(chan struct{})}
 	sc := bufio.NewScanner(in)
 	sc.Buffer(make([]byte, 64<<10), 64<<20)
 	var requests sync.WaitGroup
@@ -123,29 +129,38 @@ func runProxy(gw string, in io.Reader, out io.Writer) error {
 				id = head.ID
 			}
 		}
-		if head.Method == "notifications/cancelled" && p.isSignedOut() {
+		if head.Method == "notifications/cancelled" {
 			p.mu.Lock()
-			p.cancelled[string(head.Params.RequestID)] = true
+			if stop, ok := p.pending[string(head.Params.RequestID)]; ok {
+				close(stop)
+				delete(p.pending, string(head.Params.RequestID))
+			}
 			p.mu.Unlock()
 		}
 		switch {
 		case head.Method == "initialize": // later requests need its session
 			p.mu.Lock()
-			p.initMsg = msg
+			var init struct{ Params clientInit }
+			_ = json.Unmarshal(msg, &init)
+			p.initMsg, p.client = msg, init.Params
 			p.mu.Unlock()
-			if p.handle(msg, id, head.Method) {
+			if p.handle(msg, id, head.Method, nil) {
 				p.startStream()
 			}
+		case head.Method == "" && p.answered(head.ID, msg): // answers ask's request
 		case id != nil: // requests run concurrently; a tool call can take long
 			requests.Add(1)
+			stop := p.track(id)
 			go func() {
 				defer requests.Done()
-				p.handle(msg, id, head.Method)
+				defer p.untrack(id, stop)
+				p.handle(msg, id, head.Method, stop)
 			}()
 		default: // notifications and responses keep their order
-			p.handle(msg, nil, head.Method)
+			p.handle(msg, nil, head.Method, nil)
 		}
 	}
+	close(p.eof)
 	requests.Wait()
 	cancel()
 	p.stream.Wait()
@@ -165,9 +180,10 @@ func (p *proxy) startStream() {
 
 // handle sends one message; a request that fails gets a JSON-RPC error back.
 // Signed out, a tool call signs in first.
-func (p *proxy) handle(msg, id json.RawMessage, method string) bool {
+func (p *proxy) handle(msg, id json.RawMessage, method string, stop chan struct{}) bool {
 	triedSignIn := false
 	var instructions string // the gateway's, which the client hasn't seen
+	rounds := 0
 	for {
 		if p.isSignedOut() {
 			if method != "tools/call" || triedSignIn {
@@ -180,25 +196,44 @@ func (p *proxy) handle(msg, id json.RawMessage, method string) bool {
 				p.reply(id, toolResult("Couldn't sign in to the Hush gateway: "+err.Error(), true), nil)
 				return false
 			}
-			p.mu.Lock()
-			cancelled := p.cancelled[string(id)]
-			delete(p.cancelled, string(id))
-			p.mu.Unlock()
-			if cancelled { // e.g. it timed out while the user signed in
-				return false
-			}
+		}
+		if closed(stop) { // e.g. it timed out while the user signed in
+			return false // a cancelled request gets no reply
 		}
 		initialize := method == "initialize"
+		bridge := method == "tools/call" && p.bridges(msg)
+		out := msg
+		if bridge {
+			out = upgrade(msg, p.clientInit())
+		}
 		replied := id == nil
-		err := p.send(msg, initialize, func(m []byte) {
+		var more *inputRequired
+		err := p.send(out, initialize, func(m []byte) {
 			if !replied && isReplyTo(m, id) {
 				replied = true
+				if bridge {
+					if more = inputRequiredOf(m); more != nil {
+						return
+					}
+				}
 				m = withText(m, instructions)
 			}
 			p.write(m)
 		})
 		if err == nil && !replied {
 			err = errors.New("the gateway ended the reply early")
+		}
+		if more != nil { // even if the stream broke after it
+			if rounds++; rounds > 10 {
+				err = errors.New("the gateway kept asking for more input")
+			} else if msg, err = p.ask(msg, more, stop); err == nil {
+				continue
+			}
+			logf("%v", err)
+			if !errors.Is(err, errCancelled) {
+				p.reply(id, nil, err)
+			}
+			return false
 		}
 		if err == nil {
 			return true
@@ -416,6 +451,9 @@ func isReplyTo(msg, id json.RawMessage) bool {
 func (p *proxy) send(msg []byte, initialize bool, sink func([]byte)) error {
 	for attempt := 0; ; attempt++ {
 		tok, session := p.state()
+		if version, _, _ := modernHeaders(msg); version != "" {
+			session = "" // the newer version has no sessions
+		}
 		resp, err := p.post(msg, tok, session, initialize)
 		if err != nil {
 			return err
@@ -514,7 +552,9 @@ func (p *proxy) post(msg []byte, tok, session string, initialize bool) (*http.Re
 			req.Header.Set("Mcp-Name", headerValue(name))
 		}
 		p.mu.Lock()
-		p.version = version // notifications carry no version of their own
+		if p.initMsg == nil { // an older client's version is its initialize's
+			p.version = version // notifications carry no version of their own
+		}
 		p.mu.Unlock()
 	}
 	return mcpClient.Do(req)
