@@ -50,7 +50,7 @@ func skill(name string, version int, files map[string]string, body string) Skill
 	digest := hex.EncodeToString(sum[:])
 	files[digest] = body
 	s := Skill{ID: "skl-" + name, Name: name, Version: version}
-	s.Files = []File{{"SKILL.md", digest, len(body)}}
+	s.Files = []File{{Path: "SKILL.md", Digest: digest, Size: len(body)}}
 	return s
 }
 
@@ -116,6 +116,34 @@ func TestSync(t *testing.T) {
 	}
 	if read(t, other) == "" {
 		t.Fatal("removed a skill hush didn't install")
+	}
+}
+
+func TestSyncKeepsExecutableFiles(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("no execute bit on Windows")
+	}
+	files := map[string]string{}
+	s := skill("run", 1, files, "v1")
+	sum := sha256.Sum256([]byte("echo"))
+	digest := hex.EncodeToString(sum[:])
+	files[digest] = "echo"
+	s.Files = append(s.Files, File{Path: "scripts/run.sh", Digest: digest, Size: 4, Executable: true})
+	skills := []Skill{s}
+	fakeAPI(t, &skills, files)
+	if err := Sync(""); err != nil {
+		t.Fatal(err)
+	}
+	home, _ := os.UserHomeDir()
+	dir := filepath.Join(home, ".agents", "skills", "run")
+	for file, want := range map[string]bool{"SKILL.md": false, "scripts/run.sh": true} {
+		fi, err := os.Stat(filepath.Join(dir, filepath.FromSlash(file)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := fi.Mode().Perm()&0o111 != 0; got != want {
+			t.Fatalf("%s executable %v, want %v", file, got, want)
+		}
 	}
 }
 

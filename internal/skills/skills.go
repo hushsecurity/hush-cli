@@ -39,9 +39,10 @@ type Skill struct {
 }
 
 type File struct {
-	Path   string `json:"path"`
-	Digest string `json:"digest"`
-	Size   int    `json:"size"`
+	Path       string `json:"path"`
+	Digest     string `json:"digest"`
+	Size       int    `json:"size"`
+	Executable bool   `json:"executable"`
 }
 
 // Manifest tracks what hush installed, and the skills the user removed,
@@ -275,7 +276,7 @@ func installSkill(c *auth.Client, dir string, s Skill, manifest map[string]Insta
 	}
 	defer func() { _ = os.RemoveAll(tmp) }()
 	for _, f := range s.Files {
-		if err := download(c, s, f.Path, f.Digest, tmp); err != nil {
+		if err := download(c, s, f, tmp); err != nil {
 			return false, err
 		}
 		config.TouchLock()
@@ -324,20 +325,24 @@ func linkSkill(shared, dir, name string, changed bool, manifest map[string]Insta
 	return nil
 }
 
-func download(c *auth.Client, s Skill, path, digest, root string) error {
-	rel := filepath.FromSlash(path)
+func download(c *auth.Client, s Skill, f File, root string) error {
+	rel := filepath.FromSlash(f.Path)
 	if !filepath.IsLocal(rel) {
-		return fmt.Errorf("unsafe file path %q", path)
+		return fmt.Errorf("unsafe file path %q", f.Path)
 	}
-	data, err := fetchFile(c, s, digest)
+	data, err := fetchFile(c, s, f.Digest)
 	if err != nil {
-		return fmt.Errorf("%s: %w", path, err)
+		return fmt.Errorf("%s: %w", f.Path, err)
 	}
 	dest := filepath.Join(root, rel)
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(dest, data, 0o644)
+	perm := os.FileMode(0o644)
+	if f.Executable {
+		perm = 0o755
+	}
+	return os.WriteFile(dest, data, perm)
 }
 
 // fetchFile downloads a skill file and checks it against its digest.
